@@ -27,7 +27,7 @@ const nodeEnv = process.env.NODE_ENV || 'development';
  * FRONTEND_URL accepts a comma-separated list, so one deployment can serve the
  * production site while a developer still runs Vite against it. Trailing
  * slashes are stripped because an Origin header never carries one, and a value
- * like "https://lms.skyword.com/" would otherwise never match.
+ * like "https://lms.skywordfinance.com/" would otherwise never match.
  *
  * The default is local development only. Production sets the real origin in
  * backend/.env — no deployment hostname is baked into the code.

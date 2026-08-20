@@ -6711,28 +6711,28 @@ async function runRules(rules, source) {
     record(
       'Deployment config',
       'the production site origin is accepted exactly as a browser sends it',
-      configWith('https://lms.skyword.com').frontendUrls.join('|') === 'https://lms.skyword.com',
-      'https://lms.skyword.com'
+      configWith('https://lms.skywordfinance.com').frontendUrls.join('|') === 'https://lms.skywordfinance.com',
+      'https://lms.skywordfinance.com'
     );
     record(
       'Deployment config',
       'production and local origins can be allowed together',
-      configWith('https://lms.skyword.com,http://localhost:5173').frontendUrls.join('|') ===
-        'https://lms.skyword.com|http://localhost:5173',
+      configWith('https://lms.skywordfinance.com,http://localhost:5173').frontendUrls.join('|') ===
+        'https://lms.skywordfinance.com|http://localhost:5173',
       'comma-separated list'
     );
     record(
       'Deployment config',
       'a trailing slash is stripped, because an Origin header never has one',
-      configWith('https://lms.skyword.com/').frontendUrls.join('|') === 'https://lms.skyword.com' &&
-        configWith(' https://lms.skyword.com/ , http://localhost:5173/ ').frontendUrls.join('|') ===
-          'https://lms.skyword.com|http://localhost:5173',
+      configWith('https://lms.skywordfinance.com/').frontendUrls.join('|') === 'https://lms.skywordfinance.com' &&
+        configWith(' https://lms.skywordfinance.com/ , http://localhost:5173/ ').frontendUrls.join('|') ===
+          'https://lms.skywordfinance.com|http://localhost:5173',
       'whitespace and slashes tolerated'
     );
     record(
       'Deployment config',
       'a repeated origin is not listed twice',
-      configWith('https://lms.skyword.com,https://lms.skyword.com/').frontendUrls.length === 1,
+      configWith('https://lms.skywordfinance.com,https://lms.skywordfinance.com/').frontendUrls.length === 1,
       'de-duplicated'
     );
     record(
@@ -6785,7 +6785,7 @@ async function runRules(rules, source) {
           // Comments may name the production origin to explain a rule; what must
           // not exist is a deployment address in the code itself.
           const code = stripComments(fs.readFileSync(file, 'utf8'));
-          return !/3\.109\.94\.236/.test(code) && !/skyword\.com/.test(code);
+          return !/3\.109\.94\.236/.test(code) && !/skyword(finance)?\.com/.test(code);
         });
       })(),
       'the Elastic IP and both domains appear in environment files and comments only'
@@ -6805,7 +6805,7 @@ async function runRules(rules, source) {
       'Deployment config',
       'the backend template documents the production origin and keeps localhost as the default',
       /FRONTEND_URL=http:\/\/localhost:5173,http:\/\/localhost:5174/.test(backendExample) &&
-        /FRONTEND_URL=https:\/\/lms\.skyword\.com/.test(backendExample) &&
+        /FRONTEND_URL=https:\/\/lms\.skywordfinance\.com/.test(backendExample) &&
         !/3\.109\.94\.236/.test(backendExample),
       'dev active, production documented, no IP'
     );
@@ -6813,7 +6813,7 @@ async function runRules(rules, source) {
       'Deployment config',
       'the frontend template documents the production API URL and keeps localhost as the default',
       /VITE_API_URL=http:\/\/localhost:5000\/api/.test(frontendExample) &&
-        /VITE_API_URL=https:\/\/api\.lms\.skyword\.com\/api/.test(frontendExample) &&
+        /VITE_API_URL=https:\/\/api\.lms\.skywordfinance\.com\/api/.test(frontendExample) &&
         !/3\.109\.94\.236/.test(frontendExample),
       'dev active, production documented, no IP'
     );
