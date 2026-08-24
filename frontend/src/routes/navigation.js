@@ -99,6 +99,23 @@ export const NAV_SECTIONS = [
     ]
   },
   {
+    // TEMPORARY: oneBulk historical collection migration utility. Remove this
+    // whole section to remove the feature's nav entry.
+    id: 'temporary',
+    label: 'Temporary',
+    items: [
+      {
+        id: 'one-bulk',
+        label: 'oneBulk (temporary)',
+        path: '/one-bulk',
+        icon: 'bi-clock-history',
+        permission: [PERMISSIONS.COLLECTIONS_IMPORT],
+        roles: [],
+        available: true
+      }
+    ]
+  },
+  {
     id: 'administration',
     label: 'Administration',
     items: [

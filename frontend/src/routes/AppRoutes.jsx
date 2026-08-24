@@ -24,6 +24,9 @@ import CollectionReportPage from '../pages/reports/CollectionReportPage';
 import EmiReportPage from '../pages/reports/EmiReportPage';
 import DemandCollectionReportPage from '../pages/reports/DemandCollectionReportPage';
 import CollectionReceiptPage from '../pages/receipts/CollectionReceiptPage';
+// TEMPORARY: oneBulk historical collection migration utility. Remove this
+// import and its <Route> below to remove the feature entirely.
+import OneBulkImportPage from '../pages/oneBulk/OneBulkImportPage';
 import { PERMISSIONS } from '../utils/permissions';
 
 /** Single route table for the application. */
@@ -57,6 +60,11 @@ export default function AppRoutes() {
           <Route element={<RequirePermission anyOf={[PERMISSIONS.COLLECTIONS_VIEW]} />}>
             <Route path="/collections" element={<CollectionsListPage />} />
             <Route path="/collections/:id" element={<CollectionDetailsPage />} />
+          </Route>
+
+          {/* TEMPORARY: oneBulk historical collection migration utility. */}
+          <Route element={<RequirePermission anyOf={[PERMISSIONS.COLLECTIONS_IMPORT]} />}>
+            <Route path="/one-bulk" element={<OneBulkImportPage />} />
           </Route>
 
           <Route element={<RequirePermission anyOf={[PERMISSIONS.ROUTES_VIEW]} />}>

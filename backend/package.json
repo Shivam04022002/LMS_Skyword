@@ -14,7 +14,8 @@
     "seed:rbac": "node src/utils/seedRbac.js",
     "seed:admin": "node src/utils/seedAdmin.js",
     "seed": "npm run seed:rbac && npm run seed:admin",
-    "test:offline": "node tests/offline.test.js"
+    "test:offline": "node tests/offline.test.js",
+    "test:onebulk": "node tests/oneBulk.test.js"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",

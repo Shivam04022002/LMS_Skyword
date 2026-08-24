@@ -15,6 +15,9 @@ const routeRoutes = require('./routeRoutes');
 const demandRoutes = require('./demandRoutes');
 const reportRoutes = require('./reportRoutes');
 const dashboardRoutes = require('./dashboardRoutes');
+// TEMPORARY: oneBulk historical collection migration utility. Remove this
+// require and the router.use() line below to remove the feature entirely.
+const oneBulkRoutes = require('./oneBulkRoutes');
 const collectionController = require('../controllers/collectionController');
 const authMiddleware = require('../middleware/authMiddleware');
 const { requirePermission } = require('../middleware/permissionMiddleware');
@@ -53,5 +56,7 @@ router.use('/admin/routes', routeRoutes);
 router.use('/admin/demand', demandRoutes);
 router.use('/admin/reports', reportRoutes);
 router.use('/admin/dashboard', dashboardRoutes);
+// TEMPORARY: oneBulk historical collection migration utility. See the require above.
+router.use('/admin/one-bulk', oneBulkRoutes);
 
 module.exports = router;

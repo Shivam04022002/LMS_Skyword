@@ -25,6 +25,10 @@ const AUDIT_ACTIONS = Object.freeze({
   /* One row per bulk collection import, carrying the counts and the collection
      numbers it created — never the uploaded file. */
   COLLECTIONS_IMPORTED: 'COLLECTIONS_IMPORTED',
+  /* TEMPORARY: oneBulk historical collection migration utility. Kept distinct
+     from COLLECTIONS_IMPORTED so a historical backfill is always identifiable
+     in the audit trail, even after the oneBulk code itself is removed. */
+  ONE_BULK_IMPORTED: 'ONE_BULK_IMPORTED',
   PARTY_ADDED: 'PARTY_ADDED',
   PARTY_UPDATED: 'PARTY_UPDATED',
   PARTY_REMOVED: 'PARTY_REMOVED',
