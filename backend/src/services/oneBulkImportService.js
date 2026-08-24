@@ -14,6 +14,23 @@
  * payment status; that logic lives in one place and this file does not
  * duplicate it.
  *
+ * ── COLLECTION DATE IS OPTIONAL, HERE ONLY ────────────────────────────────────
+ * `Collection.collectionDate` is a single, required, non-null column — one
+ * collection cannot itself represent more than one date (confirmed against the
+ * model: `CollectionAllocation` carries no date of its own, and
+ * `collectionAllocationService.derivePaymentDate` stamps an instalment's paid
+ * date from its allocations' `Collection.collectionDate`). So when an operator
+ * leaves Collection Date blank, a single Excel row that spans instalments due
+ * on different dates is split into one collection PER DISTINCT instalment
+ * date — never one collection carrying a date that does not apply to some of
+ * what it paid. The FIFO plan itself is computed exactly as it always is;
+ * splitting by date only changes how that same plan is written down, so it
+ * cannot change which instalment absorbs which rupee.
+ *
+ * An explicit Collection Date always wins outright and reproduces the
+ * pre-existing single-collection behaviour byte for byte — grouping by date
+ * merely collapses to one group in that case.
+ *
  * Isolation: nothing in `collectionService.js`, `collectionImportService.js`,
  * `collectionAllocationService.js` or `collectionValidator.js` imports from
  * this file. Removing every `oneBulk*` file, the `ONE_BULK_IMPORTED` audit
@@ -48,6 +65,8 @@ const {
   ROW_STATUS
 } = require('../config/oneBulk');
 
+const DATE_SOURCE = Object.freeze({ EXPLICIT: 'EXPLICIT', AUTO_EMI_DATE: 'AUTO_EMI_DATE' });
+
 async function parseWorkbook(buffer, { filename } = {}) {
   return spreadsheet.parseWorkbook(buffer, {
     columns: COLUMNS,
@@ -59,16 +78,24 @@ async function parseWorkbook(buffer, { filename } = {}) {
   });
 }
 
-/** Runs the real post-collection field rules against one row's payload. */
+/**
+ * Runs the real post-collection field rules against one row's payload.
+ *
+ * `collectionDate` is the one field oneBulk treats differently: a blank value
+ * means "derive it from the instalment(s) this pays", not an error, so the
+ * shared rule's "required" complaint is dropped for exactly that case. Every
+ * other rule from the same chain — amount, ledger type, an actually-supplied
+ * date's format — is unweakened, and a malformed (non-blank) date still fails
+ * it normally.
+ */
 async function validateFields(payload) {
   const request = { body: { ...payload }, params: {}, query: {}, headers: {} };
   await Promise.all(collectionValidator.createCollectionRules.map((rule) => rule.run(request)));
 
   return validationResult(request)
     .array()
-    // The allocation list is derived by the backend, so the rule that demands
-    // one from a client does not apply to an imported row.
     .filter((error) => !String(error.path).startsWith('allocations'))
+    .filter((error) => !(error.path === 'collectionDate' && !payload.collectionDate))
     .map((error) => ({ field: error.path, reason: error.msg }));
 }
 
@@ -130,6 +157,10 @@ function toCollectionPayload(values, { loan, payer }) {
     loanId: loan?.id,
     customerId: payer?.id,
     amount: values.amount,
+    // Left undefined when the cell was blank — `values.collectionDate` is only
+    // present at all when the Excel cell held something. Deliberately NOT
+    // defaulted to a placeholder here; the blank case is resolved later, per
+    // instalment, once the allocation plan is known.
     collectionDate: values.collectionDate,
     ledgerType: values.ledgerType ? String(values.ledgerType).trim().toUpperCase() : undefined
   };
@@ -145,10 +176,15 @@ function toCollectionPayload(values, { loan, payer }) {
  * each loan, oldest first, so a later payment can never be planned against an
  * instalment before an earlier one for the same loan gets its turn. Rows on
  * different loans never affect each other, so their relative order is left
- * exactly as the file had it — a plain stable sort (guaranteed by
- * `Array.prototype.sort` in Node) gives both properties from one comparator.
- * Rows whose loan could not be resolved keep their file position; they cannot
- * be allocated against anything regardless of order.
+ * exactly as the file had it.
+ *
+ * A row with a blank date carries no date to compare — such rows (and any row
+ * paired against one) keep their file position relative to one another,
+ * exactly like same-date rows already do. This is deliberately conservative:
+ * nothing here guesses at an order the file did not state, and the eventual
+ * per-instalment date each blank row resolves to is derived independently,
+ * after allocation, from instalments already fixed at schedule generation —
+ * it does not depend on, and cannot be skewed by, this processing order.
  */
 function orderChronologically(rows) {
   return [...rows].sort((a, b) => {
@@ -156,31 +192,63 @@ function orderChronologically(rows) {
     const loanB = b.loan?.id ?? `unresolved:${b.rowNumber}`;
     if (loanA !== loanB) return 0; // different loans: preserve file order (stable sort)
 
-    const dateA = a.values.collectionDate ?? '';
-    const dateB = b.values.collectionDate ?? '';
-    if (dateA !== dateB) return dateA < dateB ? -1 : 1;
+    const dateA = a.values.collectionDate ?? null;
+    const dateB = b.values.collectionDate ?? null;
+    if (dateA && dateB && dateA !== dateB) return dateA < dateB ? -1 : 1;
 
     return a.rowNumber - b.rowNumber;
   });
 }
 
-/** What makes two rows the same payment, for duplicate detection. */
-const rowSignature = (payload) =>
-  [payload.loanId, payload.collectionDate, payload.amount, (payload.paymentReference ?? '').toUpperCase()].join('|');
+/** All instalment dates for a loan, keyed by EMI id — fetched once per loan, not per row. */
+async function emiDatesByLoan(loanId, { transaction } = {}) {
+  const emis = await EmiSchedule.findAll({ where: { loanId }, attributes: ['id', 'emiDate'], transaction });
+  return new Map(emis.map((emi) => [emi.id, emi.emiDate]));
+}
+
+/**
+ * Splits a FIFO allocation plan into the collection(s) it must be written as.
+ *
+ * An explicit date collapses everything into a single group — the exact
+ * pre-existing behaviour. A blank date groups plan entries by the instalment
+ * date each one actually applies to (never today, never the upload date,
+ * never the last instalment's date applied to the whole amount), sorted
+ * oldest first so the resulting collections read as a coherent history.
+ */
+function groupAllocationByDate({ plan, explicitDate, emiDates }) {
+  if (explicitDate) {
+    return [{ date: explicitDate, source: DATE_SOURCE.EXPLICIT, entries: plan }];
+  }
+
+  const byDate = new Map();
+  for (const entry of plan) {
+    const date = emiDates.get(entry.emiId);
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date).push(entry);
+  }
+
+  return [...byDate.entries()]
+    .sort(([dateA], [dateB]) => (dateA < dateB ? -1 : dateA > dateB ? 1 : 0))
+    .map(([date, entries]) => ({ date, source: DATE_SOURCE.AUTO_EMI_DATE, entries }));
+}
+
+const groupAmount = (entries) => fromPaise(entries.reduce((total, entry) => total + toPaise(entry.amount), 0n));
+
+/** What makes two collections the same payment, for duplicate detection — per date-group, not per row. */
+const groupSignature = (loanId, date, amount, paymentReference) =>
+  [loanId, date, amount, (paymentReference ?? '').toUpperCase()].join('|');
 
 /**
  * Validates and plans every row, in chronological order per loan.
  *
  * Nothing here writes. Duplicate protection reuses the existing collection
  * schema's own identity signal — loan, date, amount and reference — the same
- * one the permanent import uses, rather than inventing a new one: a genuine
- * second payment of the same amount on the same day is told apart from an
- * accidental re-upload by its reference, exactly as it already is elsewhere in
- * the system.
+ * one the permanent import uses, rather than inventing a new one; for a row
+ * whose date was derived, that signal is checked once per resulting
+ * collection, since that is what will actually be compared against the ledger
+ * at commit time.
  */
 async function evaluateRows(rows, { asOf = today() } = {}) {
-  // Resolve every row's loan/payer first, so the chronological sort can group
-  // by the resolved loan id rather than the raw loan-number text.
   const resolved = [];
   for (const row of rows) {
     const { errors, loan, payer } = await resolveRow(row.values);
@@ -190,9 +258,10 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
   const ordered = orderChronologically(resolved);
 
   const evaluated = [];
-  const seen = new Map();
+  const seen = new Map(); // group signature -> "row N"
   // emiId -> paise already taken by earlier (chronologically) rows in this file.
   const consumed = new Map();
+  const loanEmiDatesCache = new Map(); // loanId -> Map(emiId -> emiDate)
 
   for (const row of ordered) {
     const errors = [...row.resolveErrors];
@@ -215,15 +284,11 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
       } catch (error) {
         errors.push({ field: 'paymentReference', reason: error.message });
       }
-
-      try {
-        collectionService.assertCollectionDate(payload.collectionDate, asOf);
-      } catch (error) {
-        errors.push({ field: 'collectionDate', reason: error.message });
-      }
     }
 
     let allocation = null;
+    let dateGroups = null;
+
     if (errors.length === 0) {
       const { plan, unallocated } = await allocationService.planFifoAllocation({
         loanId: payload.loanId,
@@ -243,26 +308,63 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
         });
       } else {
         allocation = plan;
-        plan.forEach((entry) => {
-          consumed.set(entry.emiId, (consumed.get(entry.emiId) ?? 0n) + toPaise(entry.amount));
-        });
+
+        let emiDates = null;
+        if (!payload.collectionDate) {
+          if (!loanEmiDatesCache.has(payload.loanId)) {
+            loanEmiDatesCache.set(payload.loanId, await emiDatesByLoan(payload.loanId));
+          }
+          emiDates = loanEmiDatesCache.get(payload.loanId);
+        }
+
+        const groups = groupAllocationByDate({ plan, explicitDate: payload.collectionDate, emiDates });
+
+        // Each resulting collection's own date must still obey the same rule
+        // an explicit one always has: no advance collections.
+        for (const group of groups) {
+          try {
+            collectionService.assertCollectionDate(group.date, asOf);
+          } catch (error) {
+            errors.push({
+              field: 'collectionDate',
+              reason:
+                group.source === DATE_SOURCE.AUTO_EMI_DATE
+                  ? `Instalment date ${group.date} (derived, no Collection Date was given) — ${error.message}`
+                  : error.message
+            });
+          }
+        }
+
+        if (errors.length === 0) {
+          dateGroups = groups;
+          plan.forEach((entry) => {
+            consumed.set(entry.emiId, (consumed.get(entry.emiId) ?? 0n) + toPaise(entry.amount));
+          });
+        }
       }
     }
 
     let duplicate = false;
-    if (errors.length === 0) {
-      const signature = rowSignature(payload);
-      if (seen.has(signature)) {
-        duplicate = true;
-        errors.push({ field: 'duplicate', reason: `Identical to row ${seen.get(signature)} in this file` });
-      } else {
-        seen.set(signature, row.rowNumber);
+    if (errors.length === 0 && dateGroups) {
+      for (const group of dateGroups) {
+        const amount = groupAmount(group.entries);
+        const signature = groupSignature(payload.loanId, group.date, amount, payload.paymentReference);
+
+        if (seen.has(signature)) {
+          duplicate = true;
+          errors.push({
+            field: 'duplicate',
+            reason: `The ${group.date} portion of this row is identical to ${seen.get(signature)} in this file`
+          });
+          continue;
+        }
+        seen.set(signature, `row ${row.rowNumber}`);
 
         const existing = await Collection.findOne({
           where: {
             loanId: payload.loanId,
-            collectionDate: payload.collectionDate,
-            amount: payload.amount,
+            collectionDate: group.date,
+            amount,
             status: COLLECTION_STATUS.POSTED,
             ...(payload.paymentReference ? { paymentReference: payload.paymentReference } : { paymentReference: { [Op.is]: null } })
           }
@@ -272,7 +374,7 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
           duplicate = true;
           errors.push({
             field: 'duplicate',
-            reason: `Already posted as ${existing.collectionNumber} (same loan, date, amount and reference)`
+            reason: `The ${group.date} portion of this row is already posted as ${existing.collectionNumber} (same loan, date, amount and reference)`
           });
         }
       }
@@ -286,6 +388,18 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
       payer: payer ? { cifId: payer.cifId, fullName: payer.fullName } : null,
       payload,
       allocation,
+      // Present only for a valid row: how it will actually be written — one
+      // entry per collection that will be created. `source` tells the UI
+      // whether to label a date "(explicit)" or "(EMI date, auto)".
+      dateGroups:
+        errors.length === 0 && dateGroups
+          ? dateGroups.map((group) => ({
+              date: group.date,
+              source: group.source,
+              amount: groupAmount(group.entries),
+              allocations: group.entries.map((entry) => ({ emiId: entry.emiId, emiNumber: entry.emiNumber, amount: entry.amount }))
+            }))
+          : null,
       errors
     });
   }
@@ -331,13 +445,14 @@ async function previewImport(buffer, { filename, asOf = today() } = {}) {
  *
  * Re-parsed and re-validated from scratch — nothing from a previous preview is
  * trusted. Rows are posted in the same chronological-per-loan order the
- * preview planned against, inside ONE transaction: each row's allocation is
- * re-planned against the live ledger (which now includes every row already
- * posted earlier in this same import), and written through
- * `collectionService.createCollectionRecord` — the same function a manual
- * posting and the permanent import both use, so the eligibility rules, the
- * allocation validation, the collection numbering and the EMI snapshot rebuild
- * cannot drift from either of them.
+ * preview planned against, inside ONE transaction. A row whose date was
+ * derived writes one collection per instalment date it actually touches, each
+ * through `collectionService.createCollectionRecord` — the same function a
+ * manual posting and the permanent import both use — so the eligibility
+ * rules, the allocation validation, the collection numbering and the EMI
+ * snapshot rebuild cannot drift from either of them, and a failure on any one
+ * of a row's resulting collections rolls back everything this import has
+ * written so far, not just that row.
  */
 async function runImport(buffer, actor, context, { filename, asOf = today() } = {}) {
   const parsed = await parseWorkbook(buffer, { filename });
@@ -351,8 +466,6 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
     );
   }
 
-  // Re-establish the chronological-per-loan processing order for the write
-  // phase — `evaluateRows` returns rows in file order for display.
   const ordered = orderChronologically(
     evaluated.map((row) => ({
       rowNumber: row.rowNumber,
@@ -364,10 +477,13 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
 
   const created = await sequelize.transaction(async (transaction) => {
     const collections = [];
+    const loanEmiDatesCache = new Map();
 
     for (const orderedRow of ordered) {
       const row = byRowNumber.get(orderedRow.rowNumber);
 
+      // Re-planned inside the transaction: the rows above (and any date-group
+      // already written for this same row) have already moved the ledger.
       const { plan, unallocated } = await allocationService.planFifoAllocation({
         loanId: row.payload.loanId,
         amount: row.payload.amount,
@@ -380,14 +496,35 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
         );
       }
 
-      const collection = await collectionService.createCollectionRecord(
-        { ...row.payload, allocations: plan.map((entry) => ({ emiId: entry.emiId, amount: entry.amount })) },
-        actor,
-        transaction,
-        { asOf }
-      );
+      let emiDates = null;
+      if (!row.payload.collectionDate) {
+        if (!loanEmiDatesCache.has(row.payload.loanId)) {
+          loanEmiDatesCache.set(row.payload.loanId, await emiDatesByLoan(row.payload.loanId, { transaction }));
+        }
+        emiDates = loanEmiDatesCache.get(row.payload.loanId);
+      }
 
-      collections.push({ collection, plan, rowNumber: row.rowNumber });
+      const groups = groupAllocationByDate({ plan, explicitDate: row.payload.collectionDate, emiDates });
+
+      for (const group of groups) {
+        collectionService.assertCollectionDate(group.date, asOf);
+
+        const collection = await collectionService.createCollectionRecord(
+          {
+            ...row.payload,
+            // The row's own `amount` is the WHOLE payment; each collection
+            // this splits into must carry only its own date-group's share.
+            amount: groupAmount(group.entries),
+            collectionDate: group.date,
+            allocations: group.entries.map((entry) => ({ emiId: entry.emiId, amount: entry.amount }))
+          },
+          actor,
+          transaction,
+          { asOf }
+        );
+
+        collections.push({ collection, plan: group.entries, rowNumber: row.rowNumber, dateSource: group.source });
+      }
     }
 
     return collections;
@@ -400,7 +537,7 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
     0n
   );
   if (importedPaise !== allocatedPaise) {
-    // createCollectionRecord already enforces this per row via
+    // createCollectionRecord already enforces this per collection via
     // assertAllocationTotal; this is a defence-in-depth aggregate check, not a
     // second calculation of anything.
     throw ApiError.internal('Collection total does not equal allocation total — the import was not committed cleanly');
@@ -411,6 +548,7 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
   const fullyPaidEmis = affectedEmis.filter((emi) => emi.status === EMI_STATUS.PAID).length;
   const partiallyPaidEmis = affectedEmis.filter((emi) => emi.status === EMI_STATUS.PARTIAL).length;
   const affectedLoanIds = [...new Set(affectedEmis.map((emi) => emi.loanId))];
+  const autoDatedCollections = created.filter((entry) => entry.dateSource === DATE_SOURCE.AUTO_EMI_DATE).length;
 
   const reconciliation = {
     collectionAmountEqualsAllocationTotal: importedPaise === allocatedPaise,
@@ -429,9 +567,15 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
       file: parsed.filename,
       sheet: parsed.sheetName,
       ...summary,
-      importedRows: created.length,
+      importedRows: summary.validRows,
+      collectionsCreated: created.length,
       importedAmount: fromPaise(importedPaise),
       collectionNumbers: created.map((entry) => entry.collection.collectionNumber),
+      // Distinguishes an explicitly-dated posting from one whose date was
+      // derived from the instalment it paid, without touching any existing
+      // audit record.
+      explicitDateCollections: created.length - autoDatedCollections,
+      autoDatedCollections,
       ...reconciliation
     }
   });
@@ -440,7 +584,7 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
     file: { name: parsed.filename, sheet: parsed.sheetName },
     summary: {
       ...summary,
-      importedRows: created.length,
+      importedRows: summary.validRows,
       importedAmount: fromPaise(importedPaise),
       previewOnly: false
     },
@@ -452,6 +596,7 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
         collectionNumber: entry.collection.collectionNumber,
         amount: entry.collection.amount,
         collectionDate: entry.collection.collectionDate,
+        dateSource: entry.dateSource,
         allocations: entry.plan.map((allocation) => ({ emiNumber: allocation.emiNumber, amount: allocation.amount }))
       })),
     reconciliation,
@@ -475,6 +620,14 @@ async function buildTemplate() {
           'LMS. Use the loan\'s CURRENT loan number.'
       },
       {
+        header: 'Collection Date',
+        required: '',
+        note:
+          'Optional. Leave it blank to have the system derive the payment date from the instalment(s) the amount ' +
+          'settles, oldest first — never from today or the upload date. If the amount spans instalments due on ' +
+          'different dates, one collection is created per date. Provide it explicitly to use that exact date instead.'
+      },
+      {
         header: 'Allocation',
         required: 'System',
         note:
@@ -486,7 +639,7 @@ async function buildTemplate() {
         required: '',
         note:
           'Multiple rows for the same loan are applied oldest Collection Date first, regardless of where they sit ' +
-          'in the file. Rows on the same date keep their file order.'
+          'in the file. Rows on the same date, or with no date, keep their file order.'
       },
       {
         header: 'Duplicates',
@@ -508,11 +661,14 @@ async function buildTemplate() {
 }
 
 module.exports = {
+  DATE_SOURCE,
   parseWorkbook,
   validateFields,
   resolveRow,
   toCollectionPayload,
   orderChronologically,
+  emiDatesByLoan,
+  groupAllocationByDate,
   evaluateRows,
   summarise,
   collectErrors,

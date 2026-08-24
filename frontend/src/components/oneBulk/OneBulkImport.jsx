@@ -152,8 +152,10 @@ export default function OneBulkImport() {
                 disabled={Boolean(busy) || Boolean(result)}
               />
               <div className="form-text">
-                Loan Number, Payer CIFID, Amount, Collection Date, Payment Mode, Reference, Notes. Allocation is
-                decided by the system — a file naming an allocation, EMI or balance column is refused.
+                Loan Number, Payer CIFID, Amount, Collection Date (optional), Payment Mode, Reference, Notes.
+                Allocation is decided by the system — a file naming an allocation, EMI or balance column is refused.
+                Leave Collection Date blank to have the system date each payment from the instalment(s) it settles;
+                a payment spanning instalments due on different dates then becomes one collection per date.
               </div>
             </div>
             {result ? (
@@ -214,10 +216,15 @@ export default function OneBulkImport() {
         <div className="card mb-4">
           <div className="card-body">
             <h2 className="h6 fw-bold">Posted collections</h2>
+            <p className="form-text mt-0">
+              One Excel row can produce more than one collection when its Collection Date was left blank and the
+              amount spanned instalments due on different dates — each row is shown for every collection it produced.
+            </p>
             <div className="table-responsive" style={{ maxHeight: '18rem' }}>
               <table className="table table-sm align-middle mb-0">
                 <thead className="table-light">
                   <tr>
+                    <th scope="col">Excel row</th>
                     <th scope="col">Collection</th>
                     <th scope="col">Date</th>
                     <th scope="col" className="text-end">Amount</th>
@@ -227,8 +234,14 @@ export default function OneBulkImport() {
                 <tbody>
                   {result.imported.map((collection) => (
                     <tr key={collection.collectionNumber}>
+                      <td className="fw-semibold">{collection.row}</td>
                       <td className="font-monospace">{collection.collectionNumber}</td>
-                      <td>{collection.collectionDate}</td>
+                      <td>
+                        {collection.collectionDate}
+                        {collection.dateSource === 'AUTO_EMI_DATE' ? (
+                          <span className="text-secondary small"> (EMI date, auto)</span>
+                        ) : null}
+                      </td>
                       <td className="text-end fw-semibold">{formatCurrency(collection.amount)}</td>
                       <td className="small">
                         {collection.allocations
@@ -278,17 +291,44 @@ export default function OneBulkImport() {
                           <span className="text-secondary">{row.values.payerCif ?? '—'}</span>
                         )}
                       </td>
-                      <td>{row.values.collectionDate ?? '—'}</td>
+                      <td>
+                        {row.values.collectionDate ? (
+                          row.values.collectionDate
+                        ) : (
+                          <span className="badge text-bg-info-subtle text-info-emphasis" title="Derived from the instalment date(s) this payment settles">
+                            AUTO — EMI DATE
+                          </span>
+                        )}
+                      </td>
                       <td className="text-end">{row.values.amount ? formatCurrency(row.values.amount) : '—'}</td>
                       <td>{row.values.ledgerType ?? '—'}</td>
                       <td className="small">
-                        {row.allocation?.length
-                          ? row.allocation.map((allocation) => (
-                              <div key={`${row.rowNumber}-${allocation.emiId}`}>
-                                EMI #{allocation.emiNumber} → {formatCurrency(allocation.amount)}
+                        {row.dateGroups?.length ? (
+                          row.dateGroups.map((group) => (
+                            <div key={`${row.rowNumber}-${group.date}`} className="mb-1">
+                              <div className="fw-semibold">
+                                {group.date}
+                                {group.source === 'AUTO_EMI_DATE' ? (
+                                  <span className="text-secondary fw-normal"> (EMI date, auto)</span>
+                                ) : null}{' '}
+                                → {formatCurrency(group.amount)}
                               </div>
-                            ))
-                          : '—'}
+                              {group.allocations.map((allocation) => (
+                                <div key={`${row.rowNumber}-${group.date}-${allocation.emiId}`} className="text-secondary ps-2">
+                                  EMI #{allocation.emiNumber} → {formatCurrency(allocation.amount)}
+                                </div>
+                              ))}
+                            </div>
+                          ))
+                        ) : row.allocation?.length ? (
+                          row.allocation.map((allocation) => (
+                            <div key={`${row.rowNumber}-${allocation.emiId}`}>
+                              EMI #{allocation.emiNumber} → {formatCurrency(allocation.amount)}
+                            </div>
+                          ))
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td>
                         <span className={`badge ${STATUS_BADGE[row.status] ?? 'text-bg-secondary'}`}>

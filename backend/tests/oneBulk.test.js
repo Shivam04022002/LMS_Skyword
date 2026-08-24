@@ -157,7 +157,7 @@ const row = ({ loan, cif, amount, date, mode = 'CASH', ref = '', notes = '' }) =
       record(
         'Test 10 — re-uploading a row that was already posted is flagged as already posted, not re-imported',
         previewAgainstPosted.rows[0].status === 'DUPLICATE' &&
-          /Already posted as/.test(previewAgainstPosted.rows[0].errors[0]?.reason ?? ''),
+          /already posted as/i.test(previewAgainstPosted.rows[0].errors[0]?.reason ?? ''),
         JSON.stringify(previewAgainstPosted.rows[0].errors)
       );
     }
@@ -344,6 +344,198 @@ const row = ({ loan, cif, amount, date, mode = 'CASH', ref = '', notes = '' }) =
       await loanC.destroy();
       await customerC.destroy();
     }
+
+    // =====================================================================
+    // Blank Collection Date: derive the payment date from the EMI(s) it pays
+    // =====================================================================
+
+    async function destroyLoanFixture(loan, customer) {
+      const emis = await EmiSchedule.findAll({ where: { loanId: loan.id } });
+      await CollectionAllocation.destroy({ where: { emiId: emis.map((e) => e.id) } });
+      await Collection.destroy({ where: { loanId: loan.id } });
+      await EmiSchedule.destroy({ where: { loanId: loan.id } });
+      await LoanParty.destroy({ where: { loanId: loan.id } });
+      await loan.destroy();
+      await customer.destroy();
+    }
+
+    async function makeWeeklyLoan({ name, mobile, startDate, tenure = 5, loanAmount }) {
+      let customer;
+      let loan;
+      await sequelize.transaction(async (transaction) => {
+        customer = await customerService.createCustomerRecord({ firstName: name, mobile }, actor, transaction);
+        loan = await loanService.createLoanRecord(
+          { applicantCustomerId: customer.id, loanAmount, roi: '0', tenure, loanType: 'WEEKLY', startDate, interestMethod: 'FLAT' },
+          actor,
+          transaction
+        );
+        await loan.update({ status: LOAN_STATUS.ACTIVE }, { transaction });
+      });
+      await emiScheduleService.generateSchedule(loan.id, actor);
+      return { customer, loan };
+    }
+
+    // Loan D: 5 x ₹1,000, WEEKLY from 2026-06-24 -> EMI dates 07-01, 07-08,
+    // 07-15, 07-22, 07-29 -- exactly the spec's own example dates.
+    const { customer: customerD, loan: loanD } = await makeWeeklyLoan({
+      name: 'OneBulk Test D',
+      mobile: '9000000005',
+      startDate: '2026-06-24',
+      loanAmount: '5000'
+    });
+
+    // ---------- Test 1 (blank date) — blank date, one EMI ----------
+    {
+      const buffer = await buildWorkbook([row({ loan: loanD.loanNumber, cif: customerD.cifId, amount: 1000, date: '' })]);
+      const result = await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bd1.xlsx' });
+      record(
+        'Blank-date Test 1 — a blank date, one EMI, derives the collection date from that EMI\'s due date',
+        result.imported.length === 1 &&
+          result.imported[0].collectionDate === '2026-07-01' &&
+          result.imported[0].dateSource === 'AUTO_EMI_DATE',
+        JSON.stringify(result.imported)
+      );
+    }
+
+    // ---------- Test 2 (blank date) — blank date, partial EMI ----------
+    {
+      const buffer = await buildWorkbook([row({ loan: loanD.loanNumber, cif: customerD.cifId, amount: 600, date: '' })]);
+      const result = await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bd2.xlsx' });
+      const emis = await EmiSchedule.findAll({ where: { loanId: loanD.id }, order: [['emiNumber', 'ASC']] });
+      record(
+        'Blank-date Test 2 — a blank date, partial EMI, still derives the EMI due date and leaves it PARTIAL',
+        result.imported.length === 1 &&
+          result.imported[0].collectionDate === '2026-07-08' &&
+          emis[1].status === EMI_STATUS.PARTIAL &&
+          Number(emis[1].amountCollected) === 600 &&
+          Number(emis[1].emiAmount) - Number(emis[1].amountCollected) === 400,
+        `collectionDate=${result.imported[0].collectionDate} EMI2 status=${emis[1].status} collected=${emis[1].amountCollected}`
+      );
+    }
+
+    // ---------- Test 3 (blank date) — one row spanning multiple EMIs on different dates ----------
+    {
+      // Completes EMI2's remaining 400 (due 07-08), then fully pays EMI3
+      // (07-15), EMI4 (07-22) and EMI5 (07-29) -- one row, four collections.
+      const buffer = await buildWorkbook([row({ loan: loanD.loanNumber, cif: customerD.cifId, amount: 3400, date: '' })]);
+      const result = await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bd3.xlsx' });
+      const dates = result.imported.map((c) => c.collectionDate).sort();
+      const emis = await EmiSchedule.findAll({ where: { loanId: loanD.id }, order: [['emiNumber', 'ASC']] });
+      const allPaid = emis.every((emi) => emi.status === EMI_STATUS.PAID);
+      const allAuto = result.imported.every((c) => c.dateSource === 'AUTO_EMI_DATE');
+      record(
+        'Blank-date Test 3 — one row spanning several EMIs on different dates becomes one collection per EMI date, never the last EMI\'s date for the whole amount',
+        result.imported.length === 4 &&
+          JSON.stringify(dates) === JSON.stringify(['2026-07-08', '2026-07-15', '2026-07-22', '2026-07-29']) &&
+          allPaid &&
+          allAuto,
+        `dates=${JSON.stringify(dates)} allPaid=${allPaid}`
+      );
+    }
+
+    // ---------- Test 4 (blank date) — explicit date always wins ----------
+    const { customer: customerG, loan: loanG } = await makeWeeklyLoan({
+      name: 'OneBulk Test G',
+      mobile: '9000000006',
+      startDate: '2026-06-24',
+      tenure: 1,
+      loanAmount: '1000'
+    });
+    {
+      // EMI1 is due 2026-07-01; an explicit date must be used as-is, not replaced.
+      const buffer = await buildWorkbook([row({ loan: loanG.loanNumber, cif: customerG.cifId, amount: 1000, date: '2026-08-20' })]);
+      const result = await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bd4.xlsx' });
+      record(
+        'Blank-date Test 4 — an explicit Collection Date is preserved exactly, never replaced by the EMI date',
+        result.imported.length === 1 && result.imported[0].collectionDate === '2026-08-20' && result.imported[0].dateSource === 'EXPLICIT',
+        JSON.stringify(result.imported)
+      );
+    }
+
+    // ---------- Tests 5-8 (blank date) — validation still applies with a blank date ----------
+    {
+      const wrongLoan = await buildWorkbook([row({ loan: 'LN26-999999', cif: customerD.cifId, amount: 100, date: '' })]);
+      const previewWrongLoan = await oneBulkImportService.previewImport(wrongLoan, { filename: 'bd5.xlsx' });
+      record(
+        'Blank-date Test 5 — a wrong loan number is still rejected when the date is blank',
+        previewWrongLoan.rows[0].status === 'INVALID' && previewWrongLoan.rows[0].errors.some((e) => e.field === 'loanNumber'),
+        JSON.stringify(previewWrongLoan.rows[0].errors)
+      );
+
+      const wrongCif = await buildWorkbook([row({ loan: loanD.loanNumber, cif: customerG.cifId, amount: 100, date: '' })]);
+      const previewWrongCif = await oneBulkImportService.previewImport(wrongCif, { filename: 'bd6.xlsx' });
+      record(
+        'Blank-date Test 6 — a CIFID not party to the loan is still rejected when the date is blank',
+        previewWrongCif.rows[0].status === 'INVALID' && previewWrongCif.rows[0].errors.some((e) => e.field === 'payerCif'),
+        JSON.stringify(previewWrongCif.rows[0].errors)
+      );
+
+      const badAmount = await buildWorkbook([row({ loan: loanD.loanNumber, cif: customerD.cifId, amount: 0, date: '' })]);
+      const previewBadAmount = await oneBulkImportService.previewImport(badAmount, { filename: 'bd7.xlsx' });
+      record(
+        'Blank-date Test 7 — an invalid amount is still rejected when the date is blank',
+        previewBadAmount.rows[0].status === 'INVALID' && previewBadAmount.rows[0].errors.some((e) => e.field === 'amount'),
+        JSON.stringify(previewBadAmount.rows[0].errors)
+      );
+
+      const badMode = await buildWorkbook([row({ loan: loanD.loanNumber, cif: customerD.cifId, amount: 100, date: '', mode: 'UPI' })]);
+      const previewBadMode = await oneBulkImportService.previewImport(badMode, { filename: 'bd8.xlsx' });
+      record(
+        'Blank-date Test 8 — an invalid payment mode is still rejected when the date is blank',
+        previewBadMode.rows[0].status === 'INVALID' && previewBadMode.rows[0].errors.some((e) => e.field === 'ledgerType'),
+        JSON.stringify(previewBadMode.rows[0].errors)
+      );
+    }
+
+    // ---------- Test 9 (blank date) — transactional rollback across a multi-collection row ----------
+    const { customer: customerH, loan: loanH } = await makeWeeklyLoan({
+      name: 'OneBulk Test H',
+      mobile: '9000000007',
+      startDate: '2026-06-24',
+      tenure: 3,
+      loanAmount: '3000'
+    });
+    {
+      // One row, blank date, meant to span all 3 EMIs (3 collections). An
+      // interloper consumes the whole loan first, so the re-plan inside the
+      // transaction finds nothing left -- the whole row, and everything it
+      // would have produced, must not be posted at all.
+      const buffer = await buildWorkbook([row({ loan: loanH.loanNumber, cif: customerH.cifId, amount: 3000, date: '' })]);
+
+      const allocationService = require('../src/services/collectionAllocationService');
+      const { plan: interloperPlan } = await allocationService.planFifoAllocation({ loanId: loanH.id, amount: '3000' });
+      const interloper = await collectionService.createCollection(
+        {
+          loanId: loanH.id,
+          customerId: customerH.id,
+          amount: '3000',
+          collectionDate: '2026-06-20',
+          ledgerType: 'CASH',
+          allocations: interloperPlan.map((entry) => ({ emiId: entry.emiId, amount: entry.amount }))
+        },
+        actor,
+        context
+      );
+      createdCollectionIds.push(interloper.collectionNumber);
+
+      let threw = null;
+      try {
+        await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bd9.xlsx' });
+      } catch (error) {
+        threw = error;
+      }
+
+      const collectionsOnLoanH = await Collection.count({ where: { loanId: loanH.id } });
+      record(
+        'Blank-date Test 9 — a mid-transaction failure rolls back every collection a blank-date row would have produced, not just the failing one',
+        threw !== null && collectionsOnLoanH === 1, // only the interloper's collection
+        `threw=${threw?.message} collectionsOnLoanH=${collectionsOnLoanH} (expected 1)`
+      );
+    }
+
+    await destroyLoanFixture(loanD, customerD);
+    await destroyLoanFixture(loanG, customerG);
+    await destroyLoanFixture(loanH, customerH);
   } catch (fatal) {
     record('FATAL — the test run itself threw', false, fatal.stack || fatal.message);
   } finally {

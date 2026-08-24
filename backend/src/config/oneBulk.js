@@ -50,12 +50,14 @@ const COLUMNS = Object.freeze([
   {
     field: 'collectionDate',
     header: 'Collection Date',
-    required: true,
+    required: false,
     width: 16,
     example: '2026-08-20',
     note:
-      'Required. YYYY-MM-DD, and not in the future. Rows for the same loan are applied in date order regardless ' +
-      'of where they sit in the file, oldest first; rows on the same date keep their file order.'
+      'Optional. YYYY-MM-DD, and not in the future, if given. Leave blank to have the system derive the payment ' +
+      'date from the instalment(s) it settles, oldest first — a payment spanning instalments due on different ' +
+      'dates then becomes one collection per date. Rows for the same loan are applied in date order regardless ' +
+      'of where they sit in the file, oldest first; rows on the same date, or with no date, keep their file order.'
   },
   {
     field: 'ledgerType',
