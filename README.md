@@ -529,19 +529,38 @@ because `emiCount` is never accepted from a request.
 
 ### Financial formula
 
-No earlier phase defined an ROI interpretation, so the simplest defensible one
-was adopted and is documented here rather than left implicit. **ROI is a flat
-annual percentage** — `12.50` means 12.50% per year, stored as `DECIMAL(7,4)`.
+**ROI is a MONTHLY percentage** — `5` means 5% per month, stored as
+`DECIMAL(7,4)`. This is the current rule (`roiBasis: MONTHLY`, the default for
+every new loan); it replaced an earlier annual interpretation, and loans priced
+under that interpretation carry `roiBasis: ANNUAL` and keep meaning "per year"
+forever — the basis is stored per loan precisely so a later change of the
+default can never re-price an existing agreement (`migrations/021-add-loan-roi-basis.js`).
+
+The entered rate is normalised to its annual equivalent once, then converted to
+whichever period the loan actually charges:
 
 ```text
-years          = tenure / periodsPerYear(loanType)      DAILY 365, WEEKLY 52, MONTHLY 12
-interest       = loanAmount × (roi / 100) × years
-totalRepayment = loanAmount + interest
-emiCount       = tenure
-emiAmount      = totalRepayment / emiCount
+annualEquivalent = roi × 12                              (MONTHLY basis, current)
+                  = roi                                   (ANNUAL basis, legacy loans)
+periodRate        = annualEquivalent / (100 × periodsPerYear(loanType))
+
+periodsPerYear: DAILY 365, WEEKLY 52, BI_WEEKLY 26, MONTHLY 12
 ```
 
-This is **flat interest, not reducing balance**. All of it lives in
+Two interest methods, chosen per loan (`interestMethod`, stored, never
+re-priced by a later default):
+
+```text
+FLAT       interest       = loanAmount × (annualEquivalent / 100) × (termMonths / 12)
+           totalRepayment = loanAmount + interest
+           emiAmount      = totalRepayment / emiCount
+
+REDUCING   EMI            = P × i × (1 + i)ⁿ / ((1 + i)ⁿ − 1)     i = periodRate, n = emiCount
+           each instalment charges interest on the balance still outstanding,
+           so interest falls and principal rises across the schedule
+```
+
+FLAT is the default (`interestMethod: FLAT`). All of it lives in
 `services/loanCalculationService.js` — no financial arithmetic exists in any
 controller, route or React component. If the business uses a different
 interpretation, only that module changes.

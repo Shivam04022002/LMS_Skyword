@@ -366,7 +366,11 @@ async function buildTemplate() {
   const buffer = await spreadsheet.buildTemplateWorkbook({
     columns: COLUMNS,
     sheetName: SHEET_NAME,
-    textColumns: ['applicantCif', 'coApplicantCifs', 'guarantorCifs', 'startDate'],
+    // ROI is text-formatted too: it stops Excel silently reformatting a typed
+    // "5%" into a 0.05 percentage cell, which used to price a loan at a
+    // hundredth of the intended rate with nothing to show for it. A plain "5"
+    // still reads as a plain "5" — only the ambiguous percentage entry changes.
+    textColumns: ['applicantCif', 'coApplicantCifs', 'guarantorCifs', 'roi', 'startDate'],
     notes: [
       {
         header: 'Calculated values',
@@ -378,7 +382,9 @@ async function buildTemplate() {
       {
         header: 'ROI',
         required: '',
-        note: 'The rate is PER MONTH. 5 means 5% a month.'
+        note:
+          'The rate is PER MONTH. 5 means 5% a month. Enter it as a plain number — do not format the cell as a ' +
+          'percentage (Excel stores "5%" as 0.05, which would price the loan at a hundredth of the intended rate).'
       },
       {
         header: 'Month contracts',

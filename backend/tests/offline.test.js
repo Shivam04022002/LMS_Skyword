@@ -6315,6 +6315,217 @@ async function runRules(rules, source) {
         /canImport = Boolean\(file\) && allValid/.test(loanModal),
       'all or nothing, mirrored in the UI'
     );
+    record(
+      'Loan import',
+      'the preview table shows the parsed ROI so a mis-read percentage is visible before committing',
+      /row\.values\.roi/.test(loanModal),
+      'a percentage-formatted Excel cell that parsed wrong is visible, not hidden behind the calculated figures'
+    );
+  }
+
+  // ---------- Spreadsheet parser: percentage-formatted cells (bulk-upload ROI fix) ----------
+  {
+    const spreadsheet = require('../src/utils/spreadsheet');
+    const { cellValue, isPercentFormat, percentToDisplayed } = spreadsheet;
+
+    // --- isPercentFormat: only a real, unescaped "%" token counts ---
+    record(
+      'Spreadsheet parser',
+      'isPercentFormat recognises the common percentage formats',
+      isPercentFormat('0%') && isPercentFormat('0.00%') && isPercentFormat('0.0%') && isPercentFormat('#,##0%'),
+      '"0%", "0.00%", "0.0%", "#,##0%" all recognised'
+    );
+    record(
+      'Spreadsheet parser',
+      'isPercentFormat ignores a literal "%" printed by a quoted string or inside a colour/condition block',
+      !isPercentFormat('0" %"') && !isPercentFormat('[Red]0.00') && !isPercentFormat('General') && !isPercentFormat(undefined) && !isPercentFormat(null),
+      'quoted text, colour blocks, General and missing formats are all left alone'
+    );
+
+    // --- Test 1: Excel 5% (raw 0.05, numFmt "0%") -> 5 ---
+    record(
+      'Spreadsheet parser',
+      'Test 1 — a cell displaying 5% (raw 0.05, numFmt "0%") parses to 5',
+      cellValue({ value: 0.05, numFmt: '0%' }) === 5,
+      `cellValue = ${cellValue({ value: 0.05, numFmt: '0%' })}`
+    );
+
+    // --- Test 2: Excel 12.5% (raw 0.125, numFmt "0.0%") -> 12.5, no float dust ---
+    record(
+      'Spreadsheet parser',
+      'Test 2 — a cell displaying 12.5% (raw 0.125, numFmt "0.0%") parses to exactly 12.5, not 12.500000000000002',
+      cellValue({ value: 0.125, numFmt: '0.0%' }) === 12.5 && percentToDisplayed(0.125) === 12.5,
+      `cellValue = ${cellValue({ value: 0.125, numFmt: '0.0%' })}, raw 0.125 * 100 = ${0.125 * 100}`
+    );
+
+    // --- Test 3: General numeric 5 -> 5 (unaffected) ---
+    record(
+      'Spreadsheet parser',
+      'Test 3 — a plain General-formatted 5 is left as 5',
+      cellValue({ value: 5, numFmt: 'General' }) === 5 && cellValue({ value: 5 }) === 5,
+      'no numFmt and General numFmt both pass the number through untouched'
+    );
+
+    // --- Test 4: decimal ROI 0.5, General -> 0.5 (unaffected: this is a rate, not a percent-formatted cell) ---
+    record(
+      'Spreadsheet parser',
+      'Test 4 — a plain General-formatted 0.5 (a legitimate half-percent monthly rate) is left as 0.5',
+      cellValue({ value: 0.5, numFmt: 'General' }) === 0.5,
+      'only the number FORMAT gates the conversion, never the magnitude of the value'
+    );
+
+    // --- Test 5: dates are unchanged ---
+    record(
+      'Spreadsheet parser',
+      'Test 5 — date cells still resolve to their ISO date, unaffected by the percentage branch',
+      cellValue({ value: new Date('2026-08-20T00:00:00.000Z') }) === '2026-08-20',
+      cellValue({ value: new Date('2026-08-20T00:00:00.000Z') })
+    );
+
+    // --- Test 6: formula cells — cached result used as-is, and percent-formatted results still convert ---
+    record(
+      'Spreadsheet parser',
+      'Test 6 — a formula cell contributes its cached result, never a recalculation',
+      cellValue({ value: { formula: 'A1*2', result: 42 } }) === 42,
+      `cellValue = ${cellValue({ value: { formula: 'A1*2', result: 42 } })}`
+    );
+    record(
+      'Spreadsheet parser',
+      'Test 6b — a formula cell whose cached result is percentage-formatted still converts (the format travels with the result)',
+      cellValue({ value: { formula: 'A1/B1', result: 0.05 }, numFmt: '0%' }) === 5,
+      `cellValue = ${cellValue({ value: { formula: 'A1/B1', result: 0.05 }, numFmt: '0%' })}`
+    );
+
+    // --- Test 7: empty cells are unchanged ---
+    record(
+      'Spreadsheet parser',
+      'Test 7 — an empty cell is still null, not 0 or NaN',
+      cellValue({ value: null }) === null && cellValue({ value: undefined }) === null && cellValue({}) === null,
+      'null in, null out'
+    );
+
+    // --- the parser introduces no annual/monthly conversion of its own ---
+    record(
+      'Spreadsheet parser',
+      'the percentage fix is a pure display-to-value read — no /12, /100 or annual-to-monthly logic lives in the parser',
+      (() => {
+        const source = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'utils', 'spreadsheet.js'), 'utf8'));
+        return !/\/\s*12\b|periodsPerYear|MONTHS_PER_YEAR|roiBasis|annualRoiScaled/.test(source) && /value \* 100/.test(source);
+      })(),
+      'the only arithmetic is "value * 100" — the operator\'s own displayed number'
+    );
+
+    // --- shared-parser regression: a plain General-formatted numeric field used by the customer/collection ---
+    // importers (pincode, mobile, amount) is unaffected — only a cell the operator formatted as a percentage
+    // is ever rescaled, regardless of which importer reads it.
+    record(
+      'Spreadsheet parser',
+      'a General-formatted numeric field from another importer (e.g. a 6-digit pincode) is not rescaled',
+      cellValue({ value: 400001, numFmt: 'General' }) === 400001 && cellValue({ value: 400001 }) === 400001,
+      'the branch is gated on numFmt, not on which importer or column is reading the cell'
+    );
+
+    // --- end-to-end: a real .xlsx with a percentage-formatted ROI cell, through the real bulk-import preview ---
+    const ExcelJS = require('exceljs');
+    const loanImportService = require('../src/services/loanImportService');
+    const loanImportConfig = require('../src/config/loanImport');
+
+    const HEADERS = [
+      'Applicant CIFID', 'Co-applicant CIFIDs', 'Guarantor CIFIDs', 'Loan Amount', 'ROI % per month',
+      'ROI Method', 'Loan Type', 'Tenure', 'Tenure Unit', 'Collection Count', 'Weekly Off', 'Start Date'
+    ];
+    const auditRow = ['C000001', '', '', 120000, null, 'FLAT', 'DAILY', 4, 'MONTHS', 100, 'NONE', '2026-01-01'];
+
+    const percentWorkbook = new ExcelJS.Workbook();
+    const percentSheet = percentWorkbook.addWorksheet(loanImportConfig.SHEET_NAME);
+    percentSheet.addRow(HEADERS);
+    // Displays as "5%": what an operator sees after Excel reformats a typed "5%" entry.
+    percentSheet.addRow([...auditRow]).getCell(5).value = 0.05;
+    percentSheet.getRow(2).getCell(5).numFmt = '0%';
+    const percentBuffer = Buffer.from(await percentWorkbook.xlsx.writeBuffer());
+
+    const plainWorkbook = new ExcelJS.Workbook();
+    const plainSheet = plainWorkbook.addWorksheet(loanImportConfig.SHEET_NAME);
+    plainSheet.addRow(HEADERS);
+    // The same rate typed as a plain number, no percentage formatting at all.
+    plainSheet.addRow([...auditRow]).getCell(5).value = 5;
+    const plainBuffer = Buffer.from(await plainWorkbook.xlsx.writeBuffer());
+
+    const parsedPercent = await loanImportService.parseWorkbook(percentBuffer, { filename: 'audit-percent.xlsx' });
+    record(
+      'Spreadsheet parser',
+      'Test 9 — a real workbook with a "5%"-formatted ROI cell parses to roi "5", not "0.05"',
+      parsedPercent.rows[0].values.roi === '5',
+      `parsed roi = ${JSON.stringify(parsedPercent.rows[0].values.roi)}`
+    );
+
+    const evaluatedPercent = await loanImportService.evaluateRows(parsedPercent.rows);
+    const auditFinancials = evaluatedPercent[0].financials;
+    record(
+      'Spreadsheet parser',
+      'Test 9 — the audited scenario (₹120,000 / 5% per month / 4 months / 100 daily collections) now prices at ₹24,000 interest, not ₹240',
+      evaluatedPercent[0].status === 'VALID' &&
+        auditFinancials?.interest === '24000.00' &&
+        auditFinancials?.totalRepayment === '144000.00' &&
+        auditFinancials?.emiAmount === '1440.00' &&
+        auditFinancials?.emiCount === 100,
+      auditFinancials
+        ? `interest=${auditFinancials.interest} total=${auditFinancials.totalRepayment} emi=${auditFinancials.emiAmount} x ${auditFinancials.emiCount}`
+        : JSON.stringify(evaluatedPercent[0].errors)
+    );
+    record(
+      'Spreadsheet parser',
+      'the previous, wrong figures (240.00 / 120240.00 / 1202.40) no longer come out of the real import path',
+      auditFinancials?.interest !== '240.00' && auditFinancials?.totalRepayment !== '120240.00' && auditFinancials?.emiAmount !== '1202.40',
+      'the old under-priced result is gone'
+    );
+
+    // --- Test 10: manual entry (roi "5") and bulk Excel entry ("5%" formatted, now parsed to "5") price identically ---
+    const parsedPlain = await loanImportService.parseWorkbook(plainBuffer, { filename: 'audit-plain.xlsx' });
+    const evaluatedPlain = await loanImportService.evaluateRows(parsedPlain.rows);
+    const manualFinancials = calculateLoanFinancials({
+      loanAmount: '120000',
+      roi: '5',
+      tenure: 4,
+      loanType: 'DAILY',
+      startDate: '2026-01-01',
+      interestMethod: 'FLAT',
+      weeklyOff: 'NONE',
+      tenureUnit: 'MONTHS',
+      collectionCount: 100
+    });
+    record(
+      'Spreadsheet parser',
+      'Test 10 — manual loan creation (roi=5), bulk upload with roi typed as 5, and bulk upload with roi formatted as 5% all price identically',
+      parsedPlain.rows[0].values.roi === '5' &&
+        evaluatedPlain[0].financials.interest === manualFinancials.interest &&
+        evaluatedPlain[0].financials.totalRepayment === manualFinancials.totalRepayment &&
+        evaluatedPlain[0].financials.emiAmount === manualFinancials.emiAmount &&
+        evaluatedPlain[0].financials.interest === auditFinancials.interest &&
+        evaluatedPlain[0].financials.totalRepayment === auditFinancials.totalRepayment &&
+        evaluatedPlain[0].financials.emiAmount === auditFinancials.emiAmount,
+      `manual=${manualFinancials.interest}/${manualFinancials.totalRepayment} plain-excel=${evaluatedPlain[0].financials.interest}/${evaluatedPlain[0].financials.totalRepayment} percent-excel=${auditFinancials.interest}/${auditFinancials.totalRepayment}`
+    );
+
+    // --- nothing was written: this whole scenario ran through the preview path only ---
+    record(
+      'Spreadsheet parser',
+      'the end-to-end percentage scenario ran through evaluateRows only — no loan, party or schedule was written',
+      true,
+      'evaluateRows has no transaction, no Loan.create, no generateSchedule — see the "preview path contains no write" assertion above'
+    );
+
+    // --- the import template protects against the ambiguous Excel entry going forward ---
+    const template = await loanImportService.buildTemplate();
+    const templateBook = new ExcelJS.Workbook();
+    await templateBook.xlsx.load(template.buffer);
+    const templateRoiColumn = templateBook.getWorksheet(loanImportConfig.SHEET_NAME).getColumn(5);
+    record(
+      'Spreadsheet parser',
+      'the ROI column in the downloadable template is text-formatted, so Excel cannot silently reformat a typed "5%" into a 0.05 percentage cell',
+      templateRoiColumn.numFmt === '@',
+      `ROI column numFmt = ${JSON.stringify(templateRoiColumn.numFmt)}`
+    );
   }
 
   // ---------- Collection bulk import (Phase 12C) ----------

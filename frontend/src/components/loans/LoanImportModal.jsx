@@ -216,6 +216,7 @@ export default function LoanImportModal({ open, onClose, onImported }) {
                     <th scope="col">Applicant</th>
                     <th scope="col">Type</th>
                     <th scope="col" className="text-end">Amount</th>
+                    <th scope="col" className="text-end">ROI %/month</th>
                     <th scope="col">Tenure</th>
                     <th scope="col" className="text-end">Collections</th>
                     <th scope="col">Calculated by the system</th>
@@ -239,6 +240,7 @@ export default function LoanImportModal({ open, onClose, onImported }) {
                       </td>
                       <td>{row.values.loanType ?? '—'}</td>
                       <td className="text-end">{row.values.loanAmount ? formatCurrency(row.values.loanAmount) : '—'}</td>
+                      <td className="text-end">{row.values.roi ?? '—'}</td>
                       <td>
                         {row.values.tenure ?? '—'} {(row.values.tenureUnit ?? 'PERIODS') === 'MONTHS' ? 'months' : 'periods'}
                       </td>

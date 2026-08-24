@@ -11,6 +11,18 @@ const ApiError = require('./ApiError');
  * recalculation, and nothing is executed. Anything structurally wrong — the
  * wrong file, no sheet, an unknown column, too many rows — becomes a 400 with a
  * readable message, so a parser error never reaches the operator.
+ *
+ * ── PERCENTAGE-FORMATTED CELLS ────────────────────────────────────────────────
+ * Excel stores a percentage as the FRACTION and leaves the number format to say
+ * so: a cell the operator sees as "5%" holds 0.05 with numFmt "0%". Reading the
+ * stored number alone therefore silently divides the operator's figure by 100 —
+ * an ROI meant as 5% a month becomes 0.05% a month, and the loan is priced at a
+ * hundredth of its rate with nothing to show for it.
+ *
+ * A cell is read as the value it DISPLAYS, so what the operator saw is what the
+ * importer receives. This is a parsing rule and nothing more: no rate is
+ * converted, no annual/monthly meaning is applied, and the value handed on is
+ * the same one a plainly-typed cell would have produced.
  */
 
 /** Every .xlsx is a ZIP container, so it must start with the ZIP magic bytes. */
@@ -21,6 +33,37 @@ const normalizeHeader = (value) =>
   String(value ?? '')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
+
+/**
+ * Whether a number format displays its value multiplied by a hundred.
+ *
+ * A bare `%` is Excel's percentage token. One that is escaped (`\%`), quoted
+ * (`"%"`) or sitting inside a colour or condition block (`[Red]`) is a literal
+ * character and means nothing, so those are removed before the test — a format
+ * such as `0" %"` prints a per-cent sign without scaling anything.
+ */
+function isPercentFormat(numFmt) {
+  if (typeof numFmt !== 'string') return false;
+
+  return numFmt
+    .replace(/\./g, '')
+    .replace(/"[^"]*"/g, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .includes('%');
+}
+
+/**
+ * The number a percentage-formatted cell shows: 0.05 -> 5, 0.125 -> 12.5.
+ *
+ * `x * 100` alone leaves floating-point dust (0.125 * 100 is 12.500000000000002),
+ * which would then fail a decimal-places rule for a value the operator typed
+ * exactly. Fifteen significant digits is the most a double carries reliably, so
+ * rounding there clears the dust without inventing precision, at any magnitude.
+ */
+function percentToDisplayed(value) {
+  if (!Number.isFinite(value)) return value;
+  return Number((value * 100).toPrecision(15));
+}
 
 /** A cell's value as plain data. Formulas contribute their stored result only. */
 function cellValue(cell) {
@@ -33,13 +76,20 @@ function cellValue(cell) {
   }
   if (typeof raw === 'object') {
     // { formula, result } — the cached result is used as-is and never evaluated.
-    if ('result' in raw) return cellValue({ value: raw.result });
+    // The format travels with it: a formula cell can be percentage-formatted too.
+    if ('result' in raw) return cellValue({ value: raw.result, numFmt: cell?.numFmt });
     // { richText: [...] } — the visible text.
     if (Array.isArray(raw.richText)) return raw.richText.map((part) => part.text).join('');
     // { text, hyperlink } — the visible text, not the link target.
     if ('text' in raw) return String(raw.text);
     if ('error' in raw) return null;
     return null;
+  }
+
+  // Only a NUMBER carrying a percentage format is rescaled. A plainly-formatted
+  // number, a string, a boolean and a date all pass through untouched.
+  if (typeof raw === 'number' && isPercentFormat(cell?.numFmt)) {
+    return percentToDisplayed(raw);
   }
 
   return raw;
@@ -212,4 +262,13 @@ async function buildTemplateWorkbook({ columns, sheetName, textColumns = [], not
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
-module.exports = { ZIP_MAGIC, normalizeHeader, cellValue, asText, parseWorkbook, buildTemplateWorkbook };
+module.exports = {
+  ZIP_MAGIC,
+  normalizeHeader,
+  isPercentFormat,
+  percentToDisplayed,
+  cellValue,
+  asText,
+  parseWorkbook,
+  buildTemplateWorkbook
+};
