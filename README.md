@@ -675,7 +675,7 @@ due date.
 
 | Rule | Enforcement |
 | --- | --- |
-| Allocations must total the collection amount **exactly** | Rejected over *and* under — no silently unallocated money |
+| Allocations must total the collection amount less its bounce component, **exactly** | Rejected over *and* under — no silently unallocated money. Without a bounce component (the default) that is the whole amount, as it always was |
 | No allocation may exceed an instalment's outstanding | `409`; excess never spills into the next instalment |
 | One instalment per collection | Duplicate `emiId` rejected; `UNIQUE(collection_id, emi_id)` |
 | Amount must be > 0 | Rejects `0`, negatives, `NaN`, `Infinity`, `1e5`, >2 decimals |
@@ -687,6 +687,92 @@ due date.
 
 Multiple collections may settle one instalment, and one collection may settle
 several instalments — both in a single transaction.
+
+### Bounce collection
+
+A collection may carry a **bounce** component: money the customer handed over
+against a bounce charge rather than against an instalment. It is stored on the
+collection as `bounce_amount`, **inside** `amount` and never on top of it:
+
+```text
+collections.amount  =  SUM(collection_allocations.allocated_amount)  +  collections.bounce_amount
+      (total received)              (the EMI part)                        (the bounce part)
+```
+
+Posting enforces that identity: the allocations are validated against
+`amount − bounce_amount`, not against `amount`. Allocating the full amount *and*
+recording a bounce is refused with a `400`, because it would invent money nobody
+paid.
+
+```text
+Customer pays 1,500 (1,000 EMI + 500 bounce)
+
+  emiCollected     1,000.00   ← allocated to instalments, oldest-first as always
+  bounceCollected    500.00   ← never allocated, never principal, never interest
+  amount           1,500.00
+```
+
+**Bounce Charge is not Bounce Collection.** They are different columns answering
+different questions, and mixing them up is the mistake this feature exists to
+prevent:
+
+| Term | Column | Meaning |
+| --- | --- | --- |
+| **Bounce Charge** | `emi_schedules.bounce_charge` | What has been *assessed* on an instalment. Typed in by an operator. Says nothing about payment. |
+| **Bounce Collection** | `collections.bounce_amount` | What has actually been *received*. Only ever moves when a collection is posted. |
+| **Bounce Outstanding** | derived | Charged − collected, on the loan summary. |
+
+An instalment can carry a ₹500 bounce charge for a year and contribute **₹0** to
+bounce collection the whole time. The day a collection is posted for it, it
+contributes ₹500 — on *that collection's* date, not the instalment's due date,
+not the loan start date, not the date the charge was recorded.
+
+#### What it does and does not affect
+
+| Figure | Bounce included? |
+| --- | --- |
+| `collections.amount` / report `netCollected` / dashboard `postedAmount` | **Yes** — it is money received |
+| `emi_schedules.amount_collected`, outstanding, DPD, status | **No** — bounce is never allocated |
+| `collectedPrincipal` / `collectedInterest` | **No** — those apportion allocated amounts only |
+| **Collection efficiency** (`collected / due`) | **No** — see below |
+| Loan `totalCollected` / `totalOutstanding` | **No** — instalment money only |
+
+**Collection efficiency is unchanged.** Its numerator is still
+`SUM(emi_schedules.amount_collected)` over instalments due on or before the
+business date, and no bounce rupee ever reaches that column. The denominator is
+instalment value, and a bounce charge is not part of an instalment, so counting
+bounce in the numerator would report efficiency above what was actually
+collected against demand. `dashboardService.EFFICIENCY_DEFINITION` states this
+in the API response itself.
+
+Bounce Collection is reported as its **own** figure, independently visible on the
+dashboard, in the collection report and per collection — never folded into a
+metric that already means something else.
+
+#### Bounce-only payments
+
+A payment that is *entirely* bounce (`bounceAmount === amount`) has no instalment
+portion, so it is the one case in which a collection legitimately carries no
+allocation row. Every other collection must still allocate in full. A
+bounce-only payment that tries to allocate to an instalment is refused.
+
+#### Reversal, dates and scope
+
+Bounce obeys the existing collection rules without exception. It is summed from
+`POSTED` collections only, so a reversal removes it exactly as it removes the
+instalment money; it is filtered by `collection_date`, so it lands in the period
+the payment was received; and it goes through the same route/collector scope
+resolver as every other collection figure.
+
+#### Backward compatibility
+
+`bounce_amount` is `NOT NULL DEFAULT '0.00'`, added in place by a single
+`ALTER TABLE ... ADD COLUMN`. No existing collection, allocation, instalment,
+loan or customer row was read or rewritten, and every pre-existing collection
+satisfies the identity above with `bounce_amount = 0`. `bounceAmount` is
+optional on the API, so a request that omits it behaves exactly as before — which
+is what both bulk importers and oneBulk do; neither mentions bounce, so every
+imported row posts `0.00` and the `AUTO_EMI_DATE` behaviour is untouched.
 
 ### Concurrency
 
@@ -749,6 +835,10 @@ totalOutstanding = SUM(emi_amount) - SUM(amount_collected)
 paid/partial/overdue/remaining instalment counts and max DPD — all computed from
 the instalment rows, which are themselves computed from the ledger. There is one
 authoritative calculation, so no two totals can drift apart.
+
+It also returns `bounceCharged`, `bounceCollected` and `bounceOutstanding`
+**beside** those figures, never inside them: `totalCollected` and
+`totalOutstanding` remain instalment money exactly as they always were.
 
 ## EMI schedule
 

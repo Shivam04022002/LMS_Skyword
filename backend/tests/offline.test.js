@@ -3319,9 +3319,10 @@ async function runRules(rules, source) {
     );
     record(
       'Receipt',
-      'totals reconcile allocated against the collection amount',
-      /reconciles: allocatedPaise === amountPaise/.test(receiptSource),
-      'computed in paise'
+      'totals reconcile allocated PLUS bounce against the collection amount',
+      /reconciles: allocatedPaise \+ bouncePaise === amountPaise/.test(receiptSource) &&
+        /unallocated: fromPaise\(amountPaise - allocatedPaise - bouncePaise\)/.test(receiptSource),
+      'computed in paise; a bounce component is accounted for, not left as unexplained money'
     );
     record(
       'Receipt',
@@ -7656,11 +7657,15 @@ async function runRules(rules, source) {
         const region = source.slice(source.indexOf('function splitAllocation'), source.indexOf('module.exports'));
         return (
           !/loanCalculationService|roi|interestMethod|annuity|tenure/i.test(region) &&
-          /attributes: \['principal', 'emiAmount', 'bounceCharge'\]/.test(region) &&
-          /allocatedAmount/.test(region)
+          /attributes: \['principal', 'emiAmount'\]/.test(region) &&
+          /allocatedAmount/.test(region) &&
+          // The breakdown no longer reads the instalment's bounce_charge at
+          // all: that column is the charge ASSESSED, and this function reports
+          // money COLLECTED.
+          !/bounceCharge/.test(region)
         );
       })(),
-      'allocated_amount, principal, emi_amount, bounce_charge — nothing else'
+      'allocated_amount, principal, emi_amount — nothing else'
     );
     record(
       'Collected split',
@@ -7669,7 +7674,10 @@ async function runRules(rules, source) {
         const source = stripComments(
           fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionAllocationService.js'), 'utf8')
         );
-        const fn = source.slice(source.indexOf('async function allocationBreakdown'), source.indexOf('module.exports'));
+        const fn = source.slice(
+          source.indexOf('async function allocationBreakdown'),
+          source.indexOf('async function bounceCollected')
+        );
         return (fn.match(/await /g) ?? []).length === 1 && /CollectionAllocation\.findAll/.test(fn);
       })(),
       'a single findAll over the ledger'
@@ -7686,17 +7694,39 @@ async function runRules(rules, source) {
       })(),
       'filtering to REVERSED yields a zero breakdown, not the POSTED one'
     );
+    /*
+     * REPLACES the old memo rule. Bounce used to be reported here as the
+     * `bounce_charge` recorded on whichever instalments a payment happened to
+     * touch, de-duplicated by instalment id so it at least did not double —
+     * but a charge nobody had paid still counted, which is exactly what the
+     * Bounce Collection metric must not do. Bounce is now money, summed from
+     * the collections' own `bounce_amount`, so there is no per-instalment
+     * de-duplication to do: each collection contributes its own figure once.
+     */
     record(
       'Collected split',
-      'bounce is counted once per instalment, so an instalment paid twice cannot double it',
+      'bounce comes from the collections ledger, never from the instalments a payment happened to touch',
       (() => {
         const source = stripComments(
           fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionAllocationService.js'), 'utf8')
         );
-        const fn = source.slice(source.indexOf('async function allocationBreakdown'), source.indexOf('module.exports'));
-        return /bounceByEmi/.test(fn) && /if \(!bounceByEmi\.has\(row\.emiId\)\)/.test(fn);
+        const breakdown = source.slice(
+          source.indexOf('async function allocationBreakdown'),
+          source.indexOf('async function bounceCollected')
+        );
+        const bounceFn = source.slice(source.indexOf('async function bounceCollected'), source.indexOf('module.exports'));
+        return (
+          // Nothing about bounce is left in the allocation breakdown...
+          !/bounce/i.test(breakdown) &&
+          // ...and the bounce figure reads collections.bounce_amount, not
+          // emi_schedules.bounce_charge.
+          /Collection\.findAll/.test(bounceFn) &&
+          /'bounce_amount'/.test(bounceFn) &&
+          !/bounce_charge|bounceCharge/.test(bounceFn) &&
+          !/EmiSchedule|association: 'Emi'/.test(bounceFn)
+        );
       })(),
-      'de-duplicated by emi id'
+      'SUM(collections.bounce_amount), filtered by the caller'
     );
     record(
       'Collected split',
@@ -7778,16 +7808,19 @@ async function runRules(rules, source) {
 
     record(
       'Collected split',
-      'the four required KPI cards are on the collection report',
-      ['Net collected', 'Collected principal', 'Collected interest', 'Collected bounce'].every((label) =>
+      'the required KPI cards are on the collection report',
+      ['Net collected', 'EMI collected', 'Collected principal', 'Collected interest', 'Bounce collection'].every((label) =>
         new RegExp(`label: '${label}'`).test(collectionReportPage)
       ),
-      'Net collected, principal, interest, bounce'
+      'Net collected, EMI collected, principal, interest, bounce collection'
     );
     record(
       'Collected split',
-      'the bounce card says plainly that it is not part of net collected',
-      /label: 'Collected bounce'[\s\S]{0,200}sub: 'separate — not in net collected'/.test(collectionReportPage),
+      'the bounce card says plainly that it is money actually collected, and how many collections carried it',
+      /label: 'Bounce collection'[\s\S]{0,320}bounceCollectionCount[\s\S]{0,120}actually collected/.test(collectionReportPage) &&
+        // The old "separate — not in net collected" wording is gone: bounce IS
+        // part of the amount received, it is only outside EMI collected.
+        !/not in net collected/.test(collectionReportPage),
       'stated on the card itself'
     );
     record(
@@ -7797,9 +7830,10 @@ async function runRules(rules, source) {
         const headerCount = (collectionReportPage.match(/<th scope="col"/g) ?? []).length;
         const colSpans = [...collectionReportPage.matchAll(/colSpan="(\d+)"/g)].map((match) => Number(match[1]));
         return (
+          /<th scope="col" className="text-end">EMI collected<\/th>/.test(collectionReportPage) &&
           /<th scope="col" className="text-end">Principal<\/th>/.test(collectionReportPage) &&
           /<th scope="col" className="text-end">Interest<\/th>/.test(collectionReportPage) &&
-          /<th scope="col" className="text-end">Bounce<\/th>/.test(collectionReportPage) &&
+          /<th scope="col" className="text-end">Bounce collected<\/th>/.test(collectionReportPage) &&
           colSpans.length > 0 &&
           colSpans.every((span) => span === headerCount)
         );
@@ -8395,9 +8429,12 @@ async function runRules(rules, source) {
           reversedAmount: '0.00',
           netCollected: '2500.00',
           // Phase 13D split the net figure by what the money was applied to.
+          emiCollected: '2500.00',
           collectedPrincipal: '2100.00',
           collectedInterest: '400.00',
-          collectedBounce: '0.00'
+          // Bounce ACTUALLY collected, and how many collections carried any.
+          collectedBounce: '0.00',
+          bounceCollectionCount: 0
         },
         moneyColumn: 7,
         dateColumn: 2,
@@ -8647,12 +8684,15 @@ async function runRules(rules, source) {
     );
   }
 
-  // ---------- Collection form: manual Bounce column ----------
+  // ---------- Collection form: Bounce collection ----------
   {
     /*
-     * The Bounce column is manual entry only: nothing in the database, the API
-     * or any model carries a bounce amount today. These checks pin that state
-     * down so the UI cannot quietly start pretending the value is stored.
+     * The Bounce column used to be entry-only: nothing in the database, the API
+     * or any model carried a bounce amount, so what the operator typed was
+     * thrown away on submit. The tripwire that guarded that state has fired —
+     * `collections.bounce_amount` now exists — so these checks pin the wiring
+     * instead: what is typed is posted, it is taken OUT of the amount rather
+     * than added to it, and it never reaches an allocation.
      */
     const modalPath = path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'collections', 'CollectionFormModal.jsx');
     const modal = stripComments(fs.readFileSync(modalPath, 'utf8'));
@@ -8660,75 +8700,761 @@ async function runRules(rules, source) {
     const headerBlock = (modal.match(/<thead[\s\S]*?<\/thead>/) ?? [''])[0];
     const headers = [...headerBlock.matchAll(/<th[^>]*>([^<]+)<\/th>/g)].map((m) => m[1].trim());
     record(
-      'Bounce column',
-      'the allocation table declares Bounce between Status and Allocate',
-      headers.join('|') === '#|Due date|EMI|Collected|Outstanding|Status|Bounce|Allocate',
+      'Bounce collection form',
+      'the allocation table shows the charge assessed and the amount collected against it, separately',
+      headers.join('|') === '#|Due date|EMI|Collected|Outstanding|Status|Bounce charge|Bounce collected|Allocate',
       headers.join(' | ')
     );
 
     record(
-      'Bounce column',
-      'every instalment row renders a bounce input bound to its own EMI',
-      /aria-label=\{`Bounce amount for instalment \$\{emi\.emiNumber\}`\}/.test(modal) &&
+      'Bounce collection form',
+      'the assessed charge is displayed read-only from the instalment, never typed over',
+      /<td className="text-end small text-secondary">\{formatCurrency\(emi\.bounceCharge\)\}<\/td>/.test(modal),
+      'emi.bounceCharge is shown, not edited'
+    );
+
+    record(
+      'Bounce collection form',
+      'every instalment row renders a bounce-collected input bound to its own EMI',
+      /aria-label=\{`Bounce collected for instalment \$\{emi\.emiNumber\}`\}/.test(modal) &&
         /value=\{bounces\[emi\.id\] \?\? ''\}/.test(modal) &&
         /onChange=\{\(event\) => setBounce\(emi\.id, event\.target\.value\)\}/.test(modal),
       'one input per row, keyed by emi.id'
     );
 
     record(
-      'Bounce column',
+      'Bounce collection form',
       'bounce defaults to empty and cannot be negative',
       /const \[bounces, setBounces\] = useState\(\{\}\)/.test(modal) && /min="0"/.test(modal),
-      'empty default, min 0'
+      'empty default, min 0 — an untouched form posts 0.00 and behaves exactly as before'
     );
 
     record(
-      'Bounce column',
+      'Bounce collection form',
       'bounce validation reuses the existing paise convention',
       /isBounceValid = \(value\) =>[\s\S]{0,160}toMinorUnits\(value\) !== null/.test(modal),
       'same toMinorUnits rule as every other money field'
     );
 
-    // The allocation path must be untouched.
+    /* --------------------- the payload, and what is in it -------------------- */
+
     const payload = modal.slice(modal.indexOf('const payload = {'), modal.indexOf('const response = await createCollection'));
     record(
-      'Bounce column',
-      'the posted payload carries no bounce field',
-      !/bounce/i.test(payload) &&
+      'Bounce collection form',
+      'the posted payload carries bounce as ONE collection-level figure, not inside the allocations',
+      /bounceAmount: fromMinorUnits\(bounceMinor\)/.test(payload) &&
         /allocations: Object\.entries\(allocations\)/.test(payload) &&
-        /\.map\(\(\[emiId, value\]\) => \(\{ emiId: Number\(emiId\), amount: value \}\)\)/.test(payload),
-      'allocation payload unchanged'
-    );
-    record(
-      'Bounce column',
-      'the existing allocate input and its over-allocation check are unchanged',
-      /aria-label=\{`Allocate to instalment \$\{emi\.emiNumber\}`\}/.test(modal) &&
-        /const exceeds = requested !== null && requested > toMinorUnits\(emi\.outstanding\)/.test(modal) &&
-        /unallocatedMinor === 0/.test(modal),
-      'allocate behaviour untouched'
-    );
-    record(
-      'Bounce column',
-      'the form tells the operator that bounce is not saved',
-      /it is not saved with the collection/.test(modal),
-      'stated under the table'
+        /\.map\(\(\[emiId, value\]\) => \(\{ emiId: Number\(emiId\), amount: value \}\)\)/.test(payload) &&
+        // The allocation entries are built from `allocations` alone — no bounce
+        // value can leak into one and become principal or interest.
+        !/allocations:[\s\S]{0,400}bounce/i.test(payload),
+      'bounceAmount beside the allocations, never within them'
     );
 
-    // Tripwire: the day a backend bounce field appears, this fails and the UI
-    // should be wired to it instead of staying entry-only.
-    const backendSources = ['config/collections.js', 'services/collectionService.js', 'services/collectionAllocationService.js', 'validators/collectionValidator.js', 'models/Collection.js', 'models/CollectionAllocation.js', 'models/EmiSchedule.js']
-      .map((file) => fs.readFileSync(path.resolve(__dirname, '..', 'src', file), 'utf8'))
-      .join(String.fromCharCode(10));
-    const migrationSources = fs
-      .readdirSync(path.resolve(__dirname, '..', 'migrations'))
-      .map((file) => fs.readFileSync(path.resolve(__dirname, '..', 'migrations', file), 'utf8'))
-      .join(String.fromCharCode(10));
     record(
-      'Bounce column',
-      'no backend bounce field exists yet — wire the UI to it when one is added',
-      !/bounce/i.test(stripComments(backendSources)) && !/bounce/i.test(stripComments(migrationSources)),
-      'no column, model attribute or validator rule for bounce'
+      'Bounce collection form',
+      'bounce is subtracted from the amount, so the same rupee is never both allocated and bounced',
+      /const emiTargetMinor = amountMinor - bounceMinor;/.test(modal) &&
+        /const unallocatedMinor = emiTargetMinor - allocatedMinor;/.test(modal),
+      'allocations must total amount − bounce'
     );
+
+    record(
+      'Bounce collection form',
+      'bounce above the amount received is refused before submission',
+      /const bounceOverAmount = bounceMinor > amountMinor;/.test(modal) &&
+        /!bounceOverAmount &&/.test(modal) &&
+        /cannot be more than the amount received/.test(modal),
+      'bounce is part of the amount, not an addition to it'
+    );
+
+    record(
+      'Bounce collection form',
+      'the reconciliation panel shows total, EMI allocated and bounce together',
+      ['Total collection', 'EMI allocated', 'Bounce collection', 'Unallocated'].every((label) =>
+        new RegExp(`>${label}</div>`).test(modal)
+      ),
+      'the operator can see the three add up as they type'
+    );
+
+    record(
+      'Bounce collection form',
+      'the form no longer claims bounce is discarded',
+      !/it is not saved with the collection/.test(modal) && /it is saved as/.test(modal),
+      'the old entry-only notice is gone'
+    );
+
+    // The replacement tripwire: bounce lives on the COLLECTION, and must never
+    // acquire a home on the allocation row, where it would be indistinguishable
+    // from instalment money.
+    const allocationModelSource = stripComments(
+      fs.readFileSync(path.resolve(__dirname, '..', 'src', 'models', 'CollectionAllocation.js'), 'utf8')
+    );
+    const allocationMigration = fs.readFileSync(
+      path.resolve(__dirname, '..', 'migrations', '015-create-collection-allocations.js'),
+      'utf8'
+    );
+    record(
+      'Bounce collection form',
+      'no bounce field exists on an allocation — bounce is a property of the payment, not of an instalment split',
+      !/bounce/i.test(allocationModelSource) && !/bounce/i.test(stripComments(allocationMigration)),
+      'collection_allocations carries allocated_amount only'
+    );
+  }
+
+  // ---------- Bounce Collection: money collected, never money assessed ----------
+  {
+    const { Collection } = models;
+    const { assertBounceAmount } = collectionService;
+    const { emiPortionPaise, DEFAULT_BOUNCE_AMOUNT } = require('../src/config/collections');
+    const { splitAllocation: bSplit } = allocationService;
+
+    /**
+     * One collection, exactly as the service would store it. Nothing here is a
+     * second implementation: `amount` and `bounceAmount` are the stored columns,
+     * and `emiCollected()` is the model's own method.
+     */
+    const build = ({ amount, bounce = DEFAULT_BOUNCE_AMOUNT, date, status = COLLECTION_STATUS.POSTED, loanId = 1 }) =>
+      Collection.build({
+        collectionNumber: 'COL26-000001',
+        loanId,
+        customerId: 1,
+        amount,
+        bounceAmount: bounce,
+        collectionDate: date,
+        ledgerType: LEDGER_TYPES.CASH,
+        status
+      });
+
+    /*
+     * The dashboard / report aggregate, expressed the way the SQL does it:
+     * POSTED rows only, filtered by collection date, summing the collections'
+     * own bounce_amount. Nothing reads an instalment's bounce_charge.
+     */
+    const bounceCollection = (ledger, { from, to } = {}) => {
+      const counted = ledger.filter(
+        (c) =>
+          c.status === COLLECTION_STATUS.POSTED &&
+          (!from || c.collectionDate >= from) &&
+          (!to || c.collectionDate <= to)
+      );
+      return {
+        bounceCollection: fromPaise(counted.reduce((total, c) => total + toPaise(c.bounceAmount), 0n)),
+        bounceCollectionCount: counted.filter((c) => toPaise(c.bounceAmount) > 0n).length,
+        emiCollection: fromPaise(counted.reduce((total, c) => total + toPaise(c.emiCollected()), 0n)),
+        postedAmount: fromPaise(counted.reduce((total, c) => total + toPaise(c.amount), 0n))
+      };
+    };
+
+    /* ------------------------------- 1. basics ------------------------------ */
+
+    {
+      const c = build({ amount: '1000.00', date: '2026-08-18' });
+      record(
+        'Bounce collection',
+        '1. an EMI-only collection records bounce 0.00 and allocates the whole amount',
+        c.emiCollected() === '1000.00' &&
+          c.bounceAmount === DEFAULT_BOUNCE_AMOUNT &&
+          emiPortionPaise(c.amount, c.bounceAmount) === toPaise('1000.00'),
+        `emi=${c.emiCollected()} bounce=${c.bounceAmount} total=${c.amount}`
+      );
+    }
+
+    {
+      const c = build({ amount: '1500.00', bounce: '500.00', date: '2026-08-18' });
+      const json = c.toPublicJSON();
+      record(
+        'Bounce collection',
+        '2. EMI + bounce: 1000 EMI, 500 bounce, 1500 total - all three preserved and reconciling',
+        c.emiCollected() === '1000.00' &&
+          c.bounceAmount === '500.00' &&
+          c.amount === '1500.00' &&
+          toPaise(c.emiCollected()) + toPaise(c.bounceAmount) === toPaise(c.amount) &&
+          json.emiCollected === '1000.00' &&
+          json.bounceCollected === '500.00' &&
+          json.amount === '1500.00',
+        'emiCollected + bounceCollected === amount, and the API says so'
+      );
+    }
+
+    {
+      const emiWithCharge = EmiSchedule.build({
+        loanId: 1,
+        emiNumber: 1,
+        emiDate: '2026-08-10',
+        emiAmount: '1000.00',
+        principal: '900.00',
+        interest: '100.00',
+        bounceCharge: '500.00',
+        amountCollected: '1000.00'
+      });
+      const ledger = [build({ amount: '1000.00', date: '2026-08-18' })];
+      const totals = bounceCollection(ledger);
+      record(
+        'Bounce collection',
+        '3. a 500.00 bounce CHARGE that nobody has paid contributes 0.00 to bounce collection',
+        toPaise(emiWithCharge.bounceCharge) === toPaise('500.00') &&
+          totals.bounceCollection === '0.00' &&
+          totals.bounceCollectionCount === 0,
+        `charge=${emiWithCharge.bounceCharge} collected=${totals.bounceCollection} - the charge is not the metric`
+      );
+
+      const afterPayment = bounceCollection([...ledger, build({ amount: '500.00', bounce: '500.00', date: '2026-09-02' })]);
+      record(
+        'Bounce collection',
+        '4. once the 500.00 is actually paid, bounce collection becomes 500.00 - and only then',
+        afterPayment.bounceCollection === '500.00' &&
+          afterPayment.bounceCollectionCount === 1 &&
+          afterPayment.emiCollection === '1000.00' &&
+          afterPayment.postedAmount === '1500.00',
+        `bounce=${afterPayment.bounceCollection} emi=${afterPayment.emiCollection} total=${afterPayment.postedAmount}`
+      );
+    }
+
+    /* --------------------------- 5-7. many payments -------------------------- */
+
+    {
+      const ledger = [
+        build({ amount: '1500.00', bounce: '500.00', date: '2026-08-10' }),
+        build({ amount: '1200.00', bounce: '200.00', date: '2026-09-10' }),
+        build({ amount: '1350.00', bounce: '350.00', date: '2026-10-10' })
+      ];
+      const totals = bounceCollection(ledger);
+      record(
+        'Bounce collection',
+        '5. one loan, three EMI+bounce collections: bounce sums to 1050.00 across 3 collections',
+        totals.bounceCollection === '1050.00' &&
+          totals.bounceCollectionCount === 3 &&
+          totals.emiCollection === '3000.00' &&
+          totals.postedAmount === '4050.00' &&
+          toPaise(totals.emiCollection) + toPaise(totals.bounceCollection) === toPaise(totals.postedAmount),
+        `bounce=${totals.bounceCollection} emi=${totals.emiCollection} total=${totals.postedAmount}`
+      );
+    }
+
+    {
+      const ledger = [
+        build({ amount: '1000.00', date: '2026-08-10' }),
+        build({ amount: '1500.00', bounce: '500.00', date: '2026-09-10' }),
+        build({ amount: '1000.00', date: '2026-10-10' })
+      ];
+      const totals = bounceCollection(ledger);
+      record(
+        'Bounce collection',
+        '6. mixing EMI-only and EMI+bounce: only the collection that carried bounce is counted',
+        totals.bounceCollection === '500.00' &&
+          totals.bounceCollectionCount === 1 &&
+          totals.emiCollection === '3000.00' &&
+          totals.postedAmount === '3500.00',
+        `1 of 3 collections carried bounce; count=${totals.bounceCollectionCount}`
+      );
+    }
+
+    {
+      const ledger = [
+        build({ loanId: 1, amount: '1500.00', bounce: '500.00', date: '2026-08-10' }),
+        build({ loanId: 2, amount: '2250.00', bounce: '250.00', date: '2026-08-10' }),
+        build({ loanId: 3, amount: '900.00', date: '2026-08-10' })
+      ];
+      const totals = bounceCollection(ledger);
+      record(
+        'Bounce collection',
+        '7. across three loans the bounce collection is 750.00 from 2 collections',
+        totals.bounceCollection === '750.00' &&
+          totals.bounceCollectionCount === 2 &&
+          totals.emiCollection === '3900.00' &&
+          totals.postedAmount === '4650.00',
+        `bounce=${totals.bounceCollection} from ${totals.bounceCollectionCount} of 3 collections`
+      );
+    }
+
+    /* ------------------------------ 8-9. dates ------------------------------ */
+
+    {
+      const ledger = [
+        build({ amount: '1000.00', date: '2026-08-18' }),
+        build({ amount: '500.00', bounce: '500.00', date: '2026-09-05' })
+      ];
+
+      const onEmiDay = bounceCollection(ledger, { from: '2026-08-18', to: '2026-08-18' });
+      const onBounceDay = bounceCollection(ledger, { from: '2026-09-05', to: '2026-09-05' });
+      record(
+        'Bounce collection',
+        '8. bounce is counted on the COLLECTION date, not the EMI due date or the charge date',
+        onEmiDay.bounceCollection === '0.00' &&
+          onBounceDay.bounceCollection === '500.00' &&
+          onBounceDay.bounceCollectionCount === 1,
+        `18 Aug -> ${onEmiDay.bounceCollection}, 5 Sep -> ${onBounceDay.bounceCollection}`
+      );
+
+      const august = bounceCollection(ledger, { from: '2026-08-01', to: '2026-08-31' });
+      const september = bounceCollection(ledger, { from: '2026-09-01', to: '2026-09-30' });
+      const both = bounceCollection(ledger, { from: '2026-08-01', to: '2026-09-30' });
+      record(
+        'Bounce collection',
+        '9. different collection dates land in the right periods, and the periods add up',
+        august.bounceCollection === '0.00' &&
+          september.bounceCollection === '500.00' &&
+          both.bounceCollection === '500.00' &&
+          toPaise(august.bounceCollection) + toPaise(september.bounceCollection) === toPaise(both.bounceCollection),
+        `Aug=${august.bounceCollection} Sep=${september.bounceCollection} both=${both.bounceCollection}`
+      );
+    }
+
+    {
+      const ledger = [
+        build({ amount: '1500.00', bounce: '500.00', date: '2026-08-18' }),
+        build({ amount: '1200.00', bounce: '200.00', date: '2026-08-18', status: COLLECTION_STATUS.REVERSED })
+      ];
+      const totals = bounceCollection(ledger);
+      record(
+        'Bounce collection',
+        'a REVERSED collection stops counting toward bounce, exactly as it stops counting toward everything else',
+        totals.bounceCollection === '500.00' && totals.bounceCollectionCount === 1 && totals.postedAmount === '1500.00',
+        'POSTED only'
+      );
+    }
+
+    /* ---------------------------- 10-13. allocation --------------------------- */
+
+    {
+      const emiPaise = emiPortionPaise('1500.00', '500.00');
+      const { principalPaise, interestPaise } = bSplit({
+        allocatedPaise: emiPaise,
+        principalPaise: toPaise('900.00'),
+        emiAmountPaise: toPaise('1000.00')
+      });
+      record(
+        'Bounce collection',
+        '10. the bounce amount can never become principal: the split apportions the ALLOCATED total only',
+        emiPaise === toPaise('1000.00') && principalPaise === toPaise('900.00'),
+        `principal=${fromPaise(principalPaise)} - 90% of 1000, not of 1500`
+      );
+      record(
+        'Bounce collection',
+        '11. the bounce amount can never become interest, for the same reason',
+        interestPaise === toPaise('100.00') &&
+          principalPaise + interestPaise === emiPaise &&
+          principalPaise + interestPaise !== toPaise('1500.00'),
+        `interest=${fromPaise(interestPaise)}; principal + interest = ${fromPaise(principalPaise + interestPaise)}, not 1500.00`
+      );
+    }
+
+    {
+      const allocationSource = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionAllocationService.js'), 'utf8')
+      );
+      const fifo = allocationSource.slice(
+        allocationSource.indexOf('async function planFifoAllocation'),
+        allocationSource.indexOf('function splitAllocation')
+      );
+      const collectionSource = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionService.js'), 'utf8')
+      );
+      record(
+        'Bounce collection',
+        '12. the FIFO planner is untouched - oldest instalment first, no bounce concept in it at all',
+        !/bounce/i.test(fifo) &&
+          /order: \[\['emiNumber', 'ASC'\]\]/.test(fifo) &&
+          /const take = due < remaining \? due : remaining;/.test(fifo),
+        'oldest-first, partial and multi-EMI behaviour unchanged'
+      );
+      record(
+        'Bounce collection',
+        'posting passes the INSTALMENT portion to the allocation validator, not the gross amount',
+        /const emiPaise = assertBounceAmount\(amount, bounceAmount\);/.test(collectionSource) &&
+          /collectionAmount: fromPaise\(emiPaise\)/.test(collectionSource) &&
+          !/collectionAmount: amount/.test(collectionSource),
+        'allocations must total amount minus bounce'
+      );
+
+      let underMessage = '';
+      try {
+        const total = allocationService.assertAllocationShape([{ emiId: 1, amount: '900.00' }]);
+        allocationService.assertAllocationTotal(total, fromPaise(emiPortionPaise('1500.00', '500.00')));
+      } catch (error) {
+        underMessage = error.message;
+      }
+      record(
+        'Bounce collection',
+        'under-allocating the instalment portion is still refused, with the shortfall named',
+        /100\.00 unallocated/.test(underMessage),
+        underMessage
+      );
+    }
+
+    {
+      const c = build({ amount: '1100.00', bounce: '500.00', date: '2026-08-18' });
+      const emi = EmiSchedule.build({
+        loanId: 1,
+        emiNumber: 1,
+        emiDate: '2026-08-10',
+        emiAmount: '1000.00',
+        principal: '900.00',
+        interest: '100.00',
+        bounceCharge: '500.00',
+        amountCollected: c.emiCollected()
+      });
+      record(
+        'Bounce collection',
+        '13. a partial EMI plus a bounce payment reconciles, and the instalment sees only its 600.00',
+        c.emiCollected() === '600.00' &&
+          toPaise(c.emiCollected()) + toPaise(c.bounceAmount) === toPaise(c.amount) &&
+          emi.amountCollected === '600.00' &&
+          emi.outstanding() === '400.00' &&
+          emi.computeStatus('2026-08-18') === EMI_STATUS.PARTIAL,
+        `emi collected=${emi.amountCollected} outstanding=${emi.outstanding()} status=${emi.computeStatus('2026-08-18')}`
+      );
+    }
+
+    /* -------------------- 15. reconciliation / double counting ------------------- */
+
+    {
+      /*
+       * The failure this whole design exists to prevent: 1500 received must be
+       * 1000 allocated + 500 bounce. The wrong answer - allocating the full
+       * 1500 AND recording 500 bounce - invents 500 that nobody paid. The
+       * service refuses it, because the allocations are checked against
+       * amount - bounce and not against amount.
+       */
+      const emiPaise = emiPortionPaise('1500.00', '500.00');
+      let doubleCountStatus = null;
+      let doubleCountMessage = '';
+      try {
+        const total = allocationService.assertAllocationShape([{ emiId: 1, amount: '1500.00' }]);
+        allocationService.assertAllocationTotal(total, fromPaise(emiPaise));
+      } catch (error) {
+        doubleCountStatus = error.statusCode;
+        doubleCountMessage = error.message;
+      }
+      record(
+        'Bounce collection',
+        '15. allocating the full 1500 while also recording 500 bounce is REFUSED - no invented money',
+        doubleCountStatus === 400 && /more than the collection amount/.test(doubleCountMessage),
+        doubleCountMessage
+      );
+
+      let overStatus = null;
+      try {
+        assertBounceAmount('1000.00', '1500.00');
+      } catch (error) {
+        overStatus = error.statusCode;
+      }
+      record(
+        'Bounce collection',
+        'a bounce larger than the amount received is refused (bounce is inside the amount, not added to it)',
+        overStatus === 400 && assertBounceAmount('1500.00', '500.00') === toPaise('1000.00'),
+        `over -> ${overStatus}; 1500 with 500 bounce -> 1000.00 instalment portion`
+      );
+
+      const ledger = [
+        build({ amount: '1000.00', date: '2026-08-10' }),
+        build({ amount: '1500.00', bounce: '500.00', date: '2026-08-11' }),
+        build({ amount: '500.00', bounce: '500.00', date: '2026-08-12' }),
+        build({ amount: '1100.00', bounce: '500.00', date: '2026-08-13' })
+      ];
+      const totals = bounceCollection(ledger);
+      record(
+        'Bounce collection',
+        'across a mixed ledger, EMI collection + bounce collection equals the posted total exactly',
+        toPaise(totals.emiCollection) + toPaise(totals.bounceCollection) === toPaise(totals.postedAmount) &&
+          totals.postedAmount === '4100.00' &&
+          totals.emiCollection === '2600.00' &&
+          totals.bounceCollection === '1500.00',
+        `${totals.emiCollection} + ${totals.bounceCollection} = ${totals.postedAmount}`
+      );
+    }
+
+    /* ------------------------- bounce-only collections ------------------------ */
+
+    {
+      // The one case in which a collection legitimately has no allocation row.
+      const emiPaise = emiPortionPaise('500.00', '500.00');
+      const outcome = await allocationService.validateAllocations({
+        allocations: [],
+        collectionAmount: fromPaise(emiPaise),
+        loanId: 1,
+        transaction: null
+      });
+      record(
+        'Bounce collection',
+        'a bounce-only payment validates with no allocation and never reaches the instalment lock',
+        emiPaise === 0n && outcome.planned.length === 0 && outcome.emiIds.length === 0,
+        'nothing to allocate, so nothing is allocated'
+      );
+
+      let allocatedBounceOnly = null;
+      try {
+        await allocationService.validateAllocations({
+          allocations: [{ emiId: 1, amount: '500.00' }],
+          collectionAmount: '0.00',
+          loanId: 1,
+          transaction: null
+        });
+      } catch (error) {
+        allocatedBounceOnly = error.statusCode;
+      }
+      record(
+        'Bounce collection',
+        'a bounce-only payment that tries to allocate to an instalment is refused',
+        allocatedBounceOnly === 400,
+        `status ${allocatedBounceOnly}`
+      );
+
+      // ...and the rule is not a general escape hatch: an ordinary collection
+      // still has to allocate.
+      const emptyBody = await runRules(collectionValidator.createCollectionRules, { body: {} });
+      const normal = await runRules(collectionValidator.createCollectionRules, {
+        body: { loanId: 1, customerId: 1, amount: '1500.00', bounceAmount: '500.00', collectionDate: '2026-08-18', ledgerType: 'CASH' }
+      });
+      const bounceOnly = await runRules(collectionValidator.createCollectionRules, {
+        body: { loanId: 1, customerId: 1, amount: '500.00', bounceAmount: '500.00', collectionDate: '2026-08-18', ledgerType: 'CASH' }
+      });
+      record(
+        'Bounce collection',
+        'allocations stay required except when the payment is ENTIRELY bounce',
+        emptyBody.some((e) => e.field === 'allocations') &&
+          normal.some((e) => e.field === 'allocations') &&
+          !bounceOnly.some((e) => e.field === 'allocations'),
+        'partial bounce still allocates; only 100% bounce does not'
+      );
+    }
+
+    /* --------------------------- API and validators -------------------------- */
+
+    {
+      const badBounce = await Promise.all(
+        ['-5', 'abc', 'Infinity', '1e5', '10.123'].map((bounceAmount) =>
+          runRules(collectionValidator.createCollectionRules, {
+            body: {
+              loanId: 1,
+              customerId: 1,
+              amount: '1500.00',
+              bounceAmount,
+              collectionDate: '2026-08-18',
+              ledgerType: 'CASH',
+              allocations: [{ emiId: 1, amount: '1000.00' }]
+            }
+          })
+        )
+      );
+      record(
+        'Bounce collection',
+        'bounceAmount rejects negatives, NaN, Infinity, exponents and >2-decimal values',
+        badBounce.every((errors) => errors.some((e) => e.field === 'bounceAmount')),
+        '5/5 rejected'
+      );
+
+      const omitted = await runRules(collectionValidator.createCollectionRules, {
+        body: {
+          loanId: 1,
+          customerId: 1,
+          amount: '1000.00',
+          collectionDate: '2026-08-18',
+          ledgerType: 'CASH',
+          allocations: [{ emiId: 1, amount: '1000.00' }]
+        }
+      });
+      const zero = await runRules(collectionValidator.createCollectionRules, {
+        body: {
+          loanId: 1,
+          customerId: 1,
+          amount: '1000.00',
+          bounceAmount: '0.00',
+          collectionDate: '2026-08-18',
+          ledgerType: 'CASH',
+          allocations: [{ emiId: 1, amount: '1000.00' }]
+        }
+      });
+      record(
+        'Bounce collection',
+        'BACKWARD COMPATIBLE: a request with no bounceAmount is still valid and means 0.00',
+        omitted.length === 0 && zero.length === 0 && assertBounceAmount('1000.00') === toPaise('1000.00'),
+        'every pre-existing client keeps working unchanged'
+      );
+    }
+
+    /* ------------------------ reporting and the dashboard ----------------------- */
+
+    {
+      const reportSource = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'reportService.js'), 'utf8')
+      );
+      const dashboardSource = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'dashboardService.js'), 'utf8')
+      );
+      const collectionServiceSource = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionService.js'), 'utf8')
+      );
+      const dashboardModule = require('../src/services/dashboardService');
+
+      record(
+        'Bounce collection',
+        'the collection report reads bounce from the collection row, never from the instalments it touched',
+        /collectedBounce: collection\.bounceAmount/.test(reportSource) &&
+          /bounceCollected\(postedOnly\)/.test(reportSource) &&
+          !/bounceCharge/.test(
+            reportSource.slice(reportSource.indexOf('async function collectionReport'), reportSource.indexOf('async function emiReport'))
+          ),
+        'collections.bounce_amount, under the same POSTED filter as netCollected'
+      );
+
+      record(
+        'Bounce collection',
+        'the dashboard consumes the report summary rather than computing bounce a second way',
+        /bounceCollection: periodCollections\.summary\.collectedBounce/.test(dashboardSource) &&
+          /bounceCollection: todayCollections\.summary\.collectedBounce/.test(dashboardSource) &&
+          !/bounce_amount|bounce_charge/.test(dashboardSource),
+        'one source of truth, filtered by the same period, route and collector'
+      );
+
+      record(
+        'Bounce collection',
+        'the dashboard exposes bounceCollection and bounceCollectionCount for both today and the period',
+        (dashboardSource.match(/bounceCollection:/g) ?? []).length === 2 &&
+          (dashboardSource.match(/bounceCollectionCount:/g) ?? []).length === 2 &&
+          /bounceDefinition: BOUNCE_COLLECTION_DEFINITION/.test(dashboardSource),
+        'clearly named values, with the definition beside them'
+      );
+
+      record(
+        'Bounce collection',
+        'the shipped definition rules out every wrong reading of the number',
+        /actually collected/i.test(dashboardModule.BOUNCE_COLLECTION_DEFINITION) &&
+          /never the bounce charges assessed or outstanding/i.test(dashboardModule.BOUNCE_COLLECTION_DEFINITION) &&
+          /reversed collections excluded/i.test(dashboardModule.BOUNCE_COLLECTION_DEFINITION),
+        `${dashboardModule.BOUNCE_COLLECTION_DEFINITION.slice(0, 80)}...`
+      );
+
+      record(
+        'Bounce collection',
+        'EFFICIENCY IS UNCHANGED and says so: bounce is excluded from collected / due',
+        /Bounce collection is NOT included/.test(dashboardModule.EFFICIENCY_DEFINITION) &&
+          /COALESCE\(SUM\(e\.amount_collected\), 0\)\s+AS collectedOnDue/.test(dashboardSource),
+        'the ratio still compares instalment money against instalment demand'
+      );
+
+      record(
+        'Bounce collection',
+        'the loan position names all three separately: charge assessed, collected, outstanding',
+        /bounceCharged: fromPaise\(bounceChargedPaise\)/.test(collectionServiceSource) &&
+          /bounceCollected: fromPaise\(bounceCollectedPaise\)/.test(collectionServiceSource) &&
+          /bounceOutstanding: fromPaise\(/.test(collectionServiceSource) &&
+          // The instalment position itself is untouched by any of it.
+          /totalOutstanding: fromPaise\(totalRepaymentPaise - totalCollectedPaise\)/.test(collectionServiceSource),
+        'Bounce Charge vs Bounce Collection vs Bounce Outstanding'
+      );
+
+      record(
+        'Bounce collection',
+        'the dashboard card is on the page and reads the API verbatim',
+        (() => {
+          const page = stripComments(fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'pages', 'Dashboard.jsx'), 'utf8'));
+          return (
+            /label="Bounce collection"/.test(page) &&
+            /value=\{formatCurrency\(data\.collections\.period\.bounceCollection\)\}/.test(page) &&
+            /data\.collections\.period\.bounceCollectionCount/.test(page) &&
+            /label="Bounce collected today"/.test(page) &&
+            /value=\{formatCurrency\(data\.collections\.today\.bounceCollection\)\}/.test(page) &&
+            // "Bounce Collection", not "Bounce Charges" - the number is money
+            // received.
+            !/label="Bounce charges?"/i.test(page)
+          );
+        })(),
+        'total and count, for the period and for today'
+      );
+
+      record(
+        'Bounce collection',
+        'the collections list shows EMI, bounce and total per collection, and the colSpan matches',
+        (() => {
+          const page = stripComments(
+            fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'pages', 'collections', 'CollectionsListPage.jsx'), 'utf8')
+          );
+          const headerCount = (page.match(/<th scope="col"/g) ?? []).length;
+          const colSpans = [...page.matchAll(/colSpan="(\d+)"/g)].map((match) => Number(match[1]));
+          return (
+            /<th scope="col" className="text-end">EMI collected<\/th>/.test(page) &&
+            /<th scope="col" className="text-end">Bounce collected<\/th>/.test(page) &&
+            /<th scope="col" className="text-end">Total<\/th>/.test(page) &&
+            /formatCurrency\(collection\.bounceCollected\)/.test(page) &&
+            colSpans.length > 0 &&
+            colSpans.every((span) => span === headerCount)
+          );
+        })(),
+        'Collection | EMI collected | Bounce collected | Total'
+      );
+
+      record(
+        'Bounce collection',
+        'the export carries EMI Collected beside the three collected figures',
+        (() => {
+          const { CSV_COLUMNS: B_COLUMNS, SUMMARY_FIELDS: B_SUMMARY, REPORTS: B_REPORTS } = require('../src/config/reports');
+          const headers = B_COLUMNS[B_REPORTS.COLLECTIONS].map((column) => column.header);
+          const labels = B_SUMMARY[B_REPORTS.COLLECTIONS].map((field) => field.label);
+          return (
+            headers.includes('EMI Collected') &&
+            headers.includes('Collected Bounce') &&
+            labels.includes('EMI Collected') &&
+            labels.includes('Collected Bounce') &&
+            labels.includes('Bounce Collections')
+          );
+        })(),
+        'Amount, Collected Principal / Interest / Bounce, EMI Collected'
+      );
+    }
+
+    /* ------------------- 14/16. imports, oneBulk and the migration ------------------ */
+
+    {
+      const importSource = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionImportService.js'), 'utf8')
+      );
+      const oneBulkSource = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'oneBulkImportService.js'), 'utf8')
+      );
+      record(
+        'Bounce collection',
+        'BACKWARD COMPATIBLE: neither importer mentions bounce, so every imported row posts bounce 0.00',
+        !/bounce/i.test(importSource) && !/bounce/i.test(oneBulkSource),
+        'the permanent import and oneBulk are unchanged'
+      );
+      record(
+        'Bounce collection',
+        'oneBulk AUTO_EMI_DATE behaviour is untouched - bounce changed nothing about how a date is derived',
+        /DATE_SOURCE\.AUTO_EMI_DATE/.test(oneBulkSource) &&
+          /function groupAllocationByDate/.test(oneBulkSource) &&
+          /const date = emiDates\.get\(entry\.emiId\);/.test(oneBulkSource),
+        'a blank Collection Date still resolves per instalment date'
+      );
+
+      const migrationFiles = fs.readdirSync(path.resolve(__dirname, '..', 'migrations'));
+      const bounceMigration = migrationFiles.find((file) => /bounce-amount/.test(file));
+      const migrationSource = bounceMigration
+        ? fs.readFileSync(path.resolve(__dirname, '..', 'migrations', bounceMigration), 'utf8')
+        : '';
+      const upOnly = migrationSource.replace(/async down[\s\S]*$/, '');
+      record(
+        'Bounce collection',
+        'the migration is purely additive: one NOT NULL DEFAULT 0.00 column, nothing dropped or rewritten',
+        Boolean(bounceMigration) &&
+          /const TABLE = 'collections';/.test(migrationSource) &&
+          /addColumn\(TABLE, 'bounce_amount'/.test(migrationSource) &&
+          /defaultValue: '0\.00'/.test(migrationSource) &&
+          /allowNull: false/.test(migrationSource) &&
+          !/removeColumn|changeColumn|dropTable/.test(upOnly) &&
+          !/UPDATE |DELETE |TRUNCATE|sequelize\.query/i.test(migrationSource),
+        bounceMigration ?? 'MISSING'
+      );
+      record(
+        'Bounce collection',
+        'no existing table other than collections is touched, and no new table is created',
+        !/createTable/.test(migrationSource) &&
+          (migrationSource.match(/addColumn\(/g) ?? []).length === 1 &&
+          !/(loans|customers|users|emi_schedules|collection_allocations)'/.test(migrationSource),
+        'one column on one table'
+      );
+    }
   }
 
   // ---------- Frontend action wiring ----------

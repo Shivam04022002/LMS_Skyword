@@ -44,7 +44,12 @@ const SUMMARY_FIELDS = Object.freeze({
     { label: 'Net Collected', path: 'netCollected', type: 'money' },
     { label: 'Collected Principal', path: 'collectedPrincipal', type: 'money' },
     { label: 'Collected Interest', path: 'collectedInterest', type: 'money' },
-    { label: 'Collected Bounce', path: 'collectedBounce', type: 'money' }
+    // Money ACTUALLY received against bounce charges, not the charges assessed.
+    // Net Collected = EMI Collected + Collected Bounce, and EMI Collected =
+    // Collected Principal + Collected Interest, so nothing is counted twice.
+    { label: 'Collected Bounce', path: 'collectedBounce', type: 'money' },
+    { label: 'Bounce Collections', path: 'bounceCollectionCount', type: 'number' },
+    { label: 'EMI Collected', path: 'emiCollected', type: 'money' }
   ],
   [REPORTS.EMIS]: [
     { label: 'As Of', path: 'asOf' },
@@ -136,6 +141,9 @@ const CSV_COLUMNS = Object.freeze({
     { header: 'Collected Principal', path: 'collectedPrincipal', type: 'money' },
     { header: 'Collected Interest', path: 'collectedInterest', type: 'money' },
     { header: 'Collected Bounce', path: 'collectedBounce', type: 'money' },
+    // Principal + interest: the instalment half of Amount. Amount =
+    // EMI Collected + Collected Bounce, exactly.
+    { header: 'EMI Collected', path: 'emiCollected', type: 'money' },
     { header: 'Ledger', path: 'ledgerType' },
     { header: 'Payment Reference', path: 'paymentReference', type: 'code' },
     { header: 'Route Code', path: 'route.routeCode', type: 'code' },

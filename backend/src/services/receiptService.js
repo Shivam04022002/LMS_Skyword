@@ -5,7 +5,7 @@ const ApiError = require('../utils/ApiError');
 const reportService = require('./reportService');
 const routeService = require('./routeService');
 const { toPaise, fromPaise } = require('../utils/money');
-const { COLLECTION_STATUS } = require('../config/collections');
+const { COLLECTION_STATUS, DEFAULT_BOUNCE_AMOUNT } = require('../config/collections');
 const { ASSIGNMENT_STATUS } = require('../config/routes');
 const { ORGANISATION_NAME } = require('../config/organisation');
 
@@ -63,6 +63,9 @@ async function getReceipt(collectionId, actor, { organisationName = ORGANISATION
 
   const allocatedPaise = allocations.reduce((total, allocation) => total + toPaise(allocation.allocatedAmount), 0n);
   const amountPaise = toPaise(collection.amount);
+  // The part of the amount received against a bounce charge rather than an
+  // instalment, so it is never in `allocations` above.
+  const bouncePaise = toPaise(collection.bounceAmount ?? DEFAULT_BOUNCE_AMOUNT);
 
   const route = await LoanRoute.findOne({
     where: { loanId: collection.loanId, status: ASSIGNMENT_STATUS.ACTIVE },
@@ -80,6 +83,10 @@ async function getReceipt(collectionId, actor, { organisationName = ORGANISATION
       collectionNumber: collection.collectionNumber,
       collectionDate: collection.collectionDate,
       amount: collection.amount,
+      // The two halves of that amount, so the document shows the customer what
+      // their money was taken for.
+      emiCollected: fromPaise(amountPaise - bouncePaise),
+      bounceCollected: fromPaise(bouncePaise),
       ledgerType: collection.ledgerType,
       paymentReference: collection.paymentReference,
       notes: collection.notes,
@@ -107,10 +114,19 @@ async function getReceipt(collectionId, actor, { organisationName = ORGANISATION
     totals: {
       collectionAmount: collection.amount,
       allocatedAmount: fromPaise(allocatedPaise),
-      // Posting requires full allocation, so this is a reconciliation check the
-      // document itself can display rather than an assumption.
-      reconciles: allocatedPaise === amountPaise,
-      unallocated: fromPaise(amountPaise - allocatedPaise)
+      bounceAmount: fromPaise(bouncePaise),
+      /*
+       * The reconciliation the whole design rests on:
+       *
+       *     collection amount = allocated to instalments + bounce collected
+       *
+       * Posting enforces it, so the document can display it as a check rather
+       * than assume it. For every collection posted without a bounce component
+       * — which is every collection before this feature — bounce is 0.00 and
+       * this is the allocated-equals-amount check it has always been.
+       */
+      reconciles: allocatedPaise + bouncePaise === amountPaise,
+      unallocated: fromPaise(amountPaise - allocatedPaise - bouncePaise)
     },
 
     /**

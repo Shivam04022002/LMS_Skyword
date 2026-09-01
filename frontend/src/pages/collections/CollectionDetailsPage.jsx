@@ -159,6 +159,15 @@ export default function CollectionDetailsPage() {
                       ) : null}
                     </Row>
                     <Row label="Collection date">{formatDate(collection.collectionDate)}</Row>
+                    {/*
+                      * The split of the headline amount above. Bounce collection
+                      * is money actually received against a bounce charge; it is
+                      * inside the total, never added to it, and is deliberately
+                      * absent from the allocation table below because it was
+                      * never applied to an instalment.
+                      */}
+                    <Row label="EMI collected">{formatCurrency(collection.emiCollected)}</Row>
+                    <Row label="Bounce collection">{formatCurrency(collection.bounceCollected)}</Row>
                     <Row label="Ledger">
                       <i className={`bi ${LEDGER_ICONS[collection.ledgerType]} me-1`} aria-hidden="true" />
                       {collection.ledgerType}

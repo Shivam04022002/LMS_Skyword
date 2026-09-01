@@ -45,7 +45,31 @@ const { resolvePeriod, ALERT_TYPES, ALERT_SEVERITY, MAX_PERFORMANCE_ROWS } = req
  * dilute current performance.
  */
 const EFFICIENCY_DEFINITION =
-  'collected / due, where due = EMI value of instalments falling due on or before the business date (excluding waived), and collected = amount posted against those same instalments (reversed collections excluded)';
+  'collected / due, where due = EMI value of instalments falling due on or before the business date (excluding waived), and collected = amount posted against those same instalments (reversed collections excluded). Bounce collection is NOT included: the denominator is instalment value, and a bounce charge is not part of an instalment, so counting bounce in the numerator would report efficiency above what was actually collected against demand.';
+
+/**
+ * BOUNCE COLLECTION — stated as explicitly as the ratio above, because the
+ * obvious wrong answer is right next to the right one.
+ *
+ * It is money ACTUALLY RECEIVED against bounce charges: the `bounce_amount`
+ * component of POSTED collections dated in the window, read through the same
+ * collection report the rest of this card comes from, so it obeys the same
+ * date, route and collector filters and drops reversed collections for the same
+ * reason every other collected figure does.
+ *
+ * It is NOT the sum of `emi_schedules.bounce_charge`, nor of the charges on
+ * overdue instalments, nor of what is outstanding. An instalment carrying an
+ * unpaid 500.00 charge adds 0.00 here; the day a collection is posted for it,
+ * it adds 500.00 — on that collection's date, not the instalment's due date.
+ *
+ * It is inside `collections.postedAmount` (which is the total money received)
+ * and outside `efficiency.collected` (which is instalment money only). It is
+ * never added to either, so nothing is double counted:
+ *
+ *     postedAmount = emiCollection + bounceCollection
+ */
+const BOUNCE_COLLECTION_DEFINITION =
+  'bounce actually collected — the bounce component of POSTED collections dated in the period (reversed collections excluded), never the bounce charges assessed or outstanding on instalments';
 
 /** Percentage to one decimal, computed in integer paise. */
 function efficiencyPercent(collectedPaise, duePaise) {
@@ -346,12 +370,20 @@ async function getDashboard(filters = {}, actor) {
     },
 
     collections: {
+      // Says in the payload itself what the bounce figures below mean, the same
+      // way `efficiency.definition` does for the ratio.
+      bounceDefinition: BOUNCE_COLLECTION_DEFINITION,
       today: {
         date: businessDate,
         postedAmount: todayCollections.summary.postedAmount,
         postedCount: todayCollections.summary.postedCount,
         reversedAmount: todayCollections.summary.reversedAmount,
-        reversedCount: todayCollections.summary.reversedCount
+        reversedCount: todayCollections.summary.reversedCount,
+        // postedAmount split in two: instalment money and bounce money. Both
+        // come from the collection report, so neither is a second calculation.
+        emiCollection: todayCollections.summary.emiCollected,
+        bounceCollection: todayCollections.summary.collectedBounce,
+        bounceCollectionCount: todayCollections.summary.bounceCollectionCount
       },
       period: {
         from,
@@ -360,6 +392,9 @@ async function getDashboard(filters = {}, actor) {
         postedCount: periodCollections.summary.postedCount,
         reversedAmount: periodCollections.summary.reversedAmount,
         reversedCount: periodCollections.summary.reversedCount,
+        emiCollection: periodCollections.summary.emiCollected,
+        bounceCollection: periodCollections.summary.collectedBounce,
+        bounceCollectionCount: periodCollections.summary.bounceCollectionCount,
         averageCollection:
           periodCollections.summary.postedCount > 0
             ? fromPaise(divideRoundHalfUp(toPaise(periodCollections.summary.postedAmount), BigInt(periodCollections.summary.postedCount)))
@@ -457,4 +492,11 @@ function buildAlerts({ overallDue, routePerformance, periodCollections, business
   return alerts;
 }
 
-module.exports = { getDashboard, efficiencyPercent, routeAggregate, overallDueAggregate, EFFICIENCY_DEFINITION };
+module.exports = {
+  getDashboard,
+  efficiencyPercent,
+  routeAggregate,
+  overallDueAggregate,
+  EFFICIENCY_DEFINITION,
+  BOUNCE_COLLECTION_DEFINITION
+};

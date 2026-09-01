@@ -73,7 +73,9 @@ export default function CollectionsListPage() {
       <div className="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-4">
         <div>
           <h1 className="h3 fw-bold mb-1">Collections</h1>
-          <p className="text-secondary mb-0">Payments received and how they were applied to instalments.</p>
+          <p className="text-secondary mb-0">
+            Payments received and how they were applied. Total = EMI collected + bounce collected.
+          </p>
         </div>
         <div className="d-flex flex-wrap gap-2">
           {canImport ? (
@@ -201,7 +203,10 @@ export default function CollectionsListPage() {
                 <th scope="col">Collection</th>
                 <th scope="col">Loan</th>
                 <th scope="col">Customer</th>
-                <th scope="col" className="text-end">Amount</th>
+                {/* The two components, then the total they add up to. */}
+                <th scope="col" className="text-end">EMI collected</th>
+                <th scope="col" className="text-end">Bounce collected</th>
+                <th scope="col" className="text-end">Total</th>
                 <th scope="col">Date</th>
                 <th scope="col">Ledger</th>
                 <th scope="col">Status</th>
@@ -212,13 +217,13 @@ export default function CollectionsListPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="9" className="py-5">
+                  <td colSpan="11" className="py-5">
                     <Spinner label="Loading collections…" />
                   </td>
                 </tr>
               ) : collections.length === 0 ? (
                 <tr>
-                  <td colSpan="9" className="text-center text-secondary py-5">
+                  <td colSpan="11" className="text-center text-secondary py-5">
                     No collections found.
                   </td>
                 </tr>
@@ -233,6 +238,8 @@ export default function CollectionsListPage() {
                       <div className="fw-semibold">{collection.customer?.fullName ?? '—'}</div>
                       <div className="small text-secondary font-monospace">{collection.customer?.cifId}</div>
                     </td>
+                    <td className="text-end small">{formatCurrency(collection.emiCollected)}</td>
+                    <td className="text-end small text-secondary">{formatCurrency(collection.bounceCollected)}</td>
                     <td className="text-end fw-semibold">{formatCurrency(collection.amount)}</td>
                     <td className="small">{formatDate(collection.collectionDate)}</td>
                     <td>

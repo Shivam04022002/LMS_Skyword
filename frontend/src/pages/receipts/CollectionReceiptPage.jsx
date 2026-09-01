@@ -179,8 +179,15 @@ export default function CollectionReceiptPage() {
               </tbody>
               <tfoot>
                 <tr>
-                  <th colSpan="3" className="text-end">Total allocated</th>
+                  <th colSpan="3" className="text-end">Total allocated to instalments</th>
                   <th className="text-end">{formatCurrency(receipt.totals.allocatedAmount)}</th>
+                </tr>
+                {/* Money received against a bounce charge, so it appears here
+                    rather than in the allocation rows above — it was never
+                    applied to an instalment. The two lines add up to the total. */}
+                <tr>
+                  <th colSpan="3" className="text-end">Bounce collection</th>
+                  <th className="text-end">{formatCurrency(receipt.totals.bounceAmount)}</th>
                 </tr>
                 <tr className="lms-receipt-total">
                   <th colSpan="3" className="text-end">Total collection amount</th>
@@ -192,7 +199,7 @@ export default function CollectionReceiptPage() {
 
           {!receipt.totals.reconciles ? (
             <p className="text-danger small mt-2 mb-0">
-              Allocation does not reconcile with the collection amount — unallocated{' '}
+              Allocation plus bounce collection does not reconcile with the collection amount — unaccounted for{' '}
               {formatCurrency(receipt.totals.unallocated)}.
             </p>
           ) : null}

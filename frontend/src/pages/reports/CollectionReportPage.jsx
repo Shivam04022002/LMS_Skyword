@@ -63,12 +63,24 @@ export default function CollectionReportPage() {
   const tiles = summary
     ? [
         { key: 'net', label: 'Net collected', value: formatCurrency(summary.netCollected), sub: 'POSTED only', icon: 'bi-cash-stack', accent: 'success' },
-        // Net collected, split by what the money was applied to. Principal and
-        // interest add back up to it exactly; bounce is a memo figure and is in
-        // neither of them.
-        { key: 'principal', label: 'Collected principal', value: formatCurrency(summary.collectedPrincipal), sub: 'part of net collected', icon: 'bi-cash-coin', accent: 'primary' },
-        { key: 'interest', label: 'Collected interest', value: formatCurrency(summary.collectedInterest), sub: 'part of net collected', icon: 'bi-percent', accent: 'info' },
-        { key: 'bounce', label: 'Collected bounce', value: formatCurrency(summary.collectedBounce), sub: 'separate — not in net collected', icon: 'bi-exclamation-octagon', accent: 'warning' },
+        /*
+         * Net collected, split by what the money was applied to:
+         *   net collected = EMI collected + bounce collection
+         *   EMI collected = principal + interest
+         * Every rupee is in exactly one of the three, so no card double counts
+         * another.
+         */
+        { key: 'emi', label: 'EMI collected', value: formatCurrency(summary.emiCollected), sub: 'principal + interest', icon: 'bi-calendar-check', accent: 'primary' },
+        { key: 'principal', label: 'Collected principal', value: formatCurrency(summary.collectedPrincipal), sub: 'part of EMI collected', icon: 'bi-cash-coin', accent: 'primary' },
+        { key: 'interest', label: 'Collected interest', value: formatCurrency(summary.collectedInterest), sub: 'part of EMI collected', icon: 'bi-percent', accent: 'info' },
+        {
+          key: 'bounce',
+          label: 'Bounce collection',
+          value: formatCurrency(summary.collectedBounce),
+          sub: `${summary.bounceCollectionCount} collection${summary.bounceCollectionCount === 1 ? '' : 's'} — actually collected`,
+          icon: 'bi-exclamation-octagon',
+          accent: 'warning'
+        },
         { key: 'posted', label: 'Posted', value: summary.postedCount, sub: formatCurrency(summary.postedAmount), icon: 'bi-check2-circle', accent: 'success' },
         { key: 'reversed', label: 'Reversed', value: summary.reversedCount, sub: `${formatCurrency(summary.reversedAmount)} — excluded`, icon: 'bi-arrow-counterclockwise', accent: 'danger' },
         { key: 'total', label: 'Records', value: summary.totalCount, icon: 'bi-receipt', accent: 'info' }
@@ -79,7 +91,7 @@ export default function CollectionReportPage() {
     <div className="container-fluid px-0">
       <ReportToolbar
         title="Collection report"
-        description="Money received. Reversed collections stay visible but never count toward totals."
+        description="Money received. Total = EMI collected + bounce collection. Reversed collections stay visible but never count toward totals."
         reportKey={REPORTS.COLLECTIONS}
         exportFormat="xlsx"
         filters={query}
@@ -142,10 +154,11 @@ export default function CollectionReportPage() {
                 <th scope="col">Date</th>
                 <th scope="col">Loan</th>
                 <th scope="col">Customer</th>
-                <th scope="col" className="text-end">Amount</th>
+                <th scope="col" className="text-end">Total</th>
+                <th scope="col" className="text-end">EMI collected</th>
                 <th scope="col" className="text-end">Principal</th>
                 <th scope="col" className="text-end">Interest</th>
-                <th scope="col" className="text-end">Bounce</th>
+                <th scope="col" className="text-end">Bounce collected</th>
                 <th scope="col">Ledger</th>
                 <th scope="col">Reference</th>
                 <th scope="col">Route</th>
@@ -156,9 +169,9 @@ export default function CollectionReportPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan="14" className="py-5"><Spinner label="Loading collection report…" /></td></tr>
+                <tr><td colSpan="15" className="py-5"><Spinner label="Loading collection report…" /></td></tr>
               ) : (data?.collections ?? []).length === 0 ? (
-                <tr><td colSpan="14" className="text-center text-secondary py-5">No collections match these filters.</td></tr>
+                <tr><td colSpan="15" className="text-center text-secondary py-5">No collections match these filters.</td></tr>
               ) : (
                 data.collections.map((c) => (
                   <tr key={c.id} className={c.status === 'REVERSED' ? 'text-secondary' : undefined}>
@@ -172,6 +185,7 @@ export default function CollectionReportPage() {
                     <td className={`text-end ${c.countsTowardTotals ? 'fw-semibold' : 'text-decoration-line-through'}`}>
                       {formatCurrency(c.amount)}
                     </td>
+                    <td className="text-end small">{formatCurrency(c.emiCollected)}</td>
                     <td className="text-end small">{formatCurrency(c.collectedPrincipal)}</td>
                     <td className="text-end small">{formatCurrency(c.collectedInterest)}</td>
                     <td className="text-end small text-secondary">{formatCurrency(c.collectedBounce)}</td>

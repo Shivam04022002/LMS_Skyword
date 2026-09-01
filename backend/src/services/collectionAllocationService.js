@@ -1,6 +1,6 @@
 'use strict';
 
-const { fn, col } = require('sequelize');
+const { fn, col, literal } = require('sequelize');
 const { EmiSchedule, CollectionAllocation, Collection } = require('../models');
 const ApiError = require('../utils/ApiError');
 const { toPaise, fromPaise, divideRoundHalfUp } = require('../utils/money');
@@ -242,8 +242,29 @@ async function recalculateEmis(emiIds, transaction, asOf = today()) {
  *   - any allocation over an instalment's outstanding balance (no automatic
  *     spillover to the next instalment)
  *   - instalments belonging to a different loan
+ *
+ * `collectionAmount` is the INSTALMENT portion of the payment — the total
+ * received minus any bounce component — because bounce is not allocated to an
+ * instalment. For every collection posted before bounce existed, and for every
+ * collection posted without one, that portion is the whole amount and this
+ * function behaves exactly as it always has.
  */
 async function validateAllocations({ allocations, collectionAmount, loanId, transaction }) {
+  /*
+   * A payment that was entirely bounce has no instalment portion, so there is
+   * nothing to allocate and no allocation row to write. This is the ONLY case
+   * in which a collection may carry none — the "allocate every rupee" rule is
+   * unchanged, it is simply satisfied by zero rupees of instalment.
+   */
+  if (toPaise(collectionAmount) === 0n) {
+    if (Array.isArray(allocations) && allocations.length > 0) {
+      throw ApiError.badRequest(
+        'This payment is entirely a bounce collection, so it cannot be allocated to an instalment'
+      );
+    }
+    return { planned: [], emiIds: [] };
+  }
+
   // Shape and totals are checked before any lock is taken.
   const allocatedTotal = assertAllocationShape(allocations);
   assertAllocationTotal(allocatedTotal, collectionAmount);
@@ -355,32 +376,33 @@ function splitAllocation({ allocatedPaise, principalPaise, emiAmountPaise }) {
 }
 
 /**
- * The principal / interest / bounce breakdown of a set of collections, read
- * straight from the allocation ledger.
+ * The principal / interest breakdown of a set of collections, read straight
+ * from the allocation ledger.
  *
  * One query. Every value comes from a stored column: `allocated_amount` from
- * the ledger and `principal` / `emi_amount` / `bounce_charge` from the
- * instalment the payment landed on.
+ * the ledger and `principal` / `emi_amount` from the instalment the payment
+ * landed on.
  *
- * Bounce is NOT money that was collected — it is a manually recorded fee that
- * never enters a collection's amount or its allocations. It is reported here as
- * a memo figure against the instalments a payment touched, and each instalment
- * is counted once no matter how many collections reached it, so the aggregate
- * cannot overstate. It is never added into any collected total.
+ * BOUNCE IS NOT HERE, deliberately. It used to be reported from this function
+ * as a memo — the `bounce_charge` recorded on whichever instalments a payment
+ * happened to touch — which counted a charge nobody had paid. Bounce COLLECTION
+ * is money, it lives on `collections.bounce_amount`, it is never allocated to
+ * an instalment, and it is summed by `bounceCollected` below. An instalment's
+ * `bounce_charge` is the charge assessed and says nothing about what was
+ * collected, so nothing in this file reads it any more.
  */
 async function allocationBreakdown(collectionWhere) {
   const rows = await CollectionAllocation.findAll({
     attributes: ['collectionId', 'emiId', 'allocatedAmount'],
     include: [
       { association: 'Collection', attributes: [], where: collectionWhere, required: true },
-      { association: 'Emi', attributes: ['principal', 'emiAmount', 'bounceCharge'], required: true }
+      { association: 'Emi', attributes: ['principal', 'emiAmount'], required: true }
     ],
     raw: true,
     nest: true
   });
 
   const byCollection = new Map();
-  const bounceByEmi = new Map();
 
   let principalTotal = 0n;
   let interestTotal = 0n;
@@ -393,25 +415,14 @@ async function allocationBreakdown(collectionWhere) {
       emiAmountPaise: toPaise(String(row.Emi.emiAmount))
     });
 
-    const entry = byCollection.get(row.collectionId) ?? { principal: 0n, interest: 0n, bounce: 0n, emiIds: new Set() };
+    const entry = byCollection.get(row.collectionId) ?? { principal: 0n, interest: 0n };
     entry.principal += principalPaise;
     entry.interest += interestPaise;
-    if (!entry.emiIds.has(row.emiId)) {
-      entry.emiIds.add(row.emiId);
-      entry.bounce += toPaise(String(row.Emi.bounceCharge ?? '0'));
-    }
     byCollection.set(row.collectionId, entry);
 
     principalTotal += principalPaise;
     interestTotal += interestPaise;
-
-    // Counted once per instalment across the whole set.
-    if (!bounceByEmi.has(row.emiId)) {
-      bounceByEmi.set(row.emiId, toPaise(String(row.Emi.bounceCharge ?? '0')));
-    }
   }
-
-  const bounceTotal = [...bounceByEmi.values()].reduce((total, paise) => total + paise, 0n);
 
   return {
     byCollection: new Map(
@@ -420,21 +431,58 @@ async function allocationBreakdown(collectionWhere) {
         {
           collectedPrincipal: fromPaise(entry.principal),
           collectedInterest: fromPaise(entry.interest),
-          collectedBounce: fromPaise(entry.bounce)
+          // Principal + interest, i.e. this collection's allocated total. The
+          // EMI half of the payment; the bounce half sits beside it.
+          emiCollected: fromPaise(entry.principal + entry.interest)
         }
       ])
     ),
     totals: {
       collectedPrincipal: fromPaise(principalTotal),
       collectedInterest: fromPaise(interestTotal),
-      collectedBounce: fromPaise(bounceTotal)
+      emiCollected: fromPaise(principalTotal + interestTotal)
     }
+  };
+}
+
+/**
+ * BOUNCE COLLECTION for a set of collections: money actually received against a
+ * bounce charge.
+ *
+ * Summed from `collections.bounce_amount` — a value that only ever becomes
+ * non-zero because someone posted a collection carrying a bounce component. It
+ * is NOT derived from `emi_schedules.bounce_charge`, so an instalment carrying
+ * an unpaid 500.00 charge contributes 0.00 here, and starts contributing 500.00
+ * only once a collection is posted for it.
+ *
+ * The caller supplies the filter, which is what makes this obey the collection
+ * date, the POSTED/REVERSED rule and the route scope exactly as every other
+ * collection figure does — a reversed collection stops counting here for the
+ * same reason it stops counting anywhere else.
+ *
+ * `count` is the number of collections that carried any bounce at all, which is
+ * what "12 collections" on the dashboard card means.
+ */
+async function bounceCollected(collectionWhere) {
+  const [row] = await Collection.findAll({
+    attributes: [
+      [fn('COALESCE', fn('SUM', col('bounce_amount')), 0), 'total'],
+      [fn('COALESCE', fn('SUM', literal('CASE WHEN bounce_amount > 0 THEN 1 ELSE 0 END')), 0), 'count']
+    ],
+    where: collectionWhere,
+    raw: true
+  });
+
+  return {
+    bounceCollection: fromPaise(toPaise(String(row?.total ?? '0'))),
+    bounceCollectionCount: Number(row?.count ?? 0)
   };
 }
 
 module.exports = {
   splitAllocation,
   allocationBreakdown,
+  bounceCollected,
   lockEmis,
   calculateCollectedByEmi,
   outstandingPaise,

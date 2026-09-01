@@ -301,8 +301,9 @@ async function collectionReport(filters = {}, actor) {
 
   const { routeByLoan } = await routeContextForLoans(rows.map((row) => row.loanId));
 
-  // The principal / interest / bounce split of the rows on this page, read from
-  // the allocation ledger. One query for the page, not one per collection.
+  // The principal / interest split of the rows on this page, read from the
+  // allocation ledger. One query for the page, not one per collection. Bounce
+  // is NOT in it: it is stored on the collection row itself, already in hand.
   const pageBreakdown = rows.length
     ? (await collectionAllocationService.allocationBreakdown({ id: { [Op.in]: rows.map((row) => row.id) } })).byCollection
     : new Map();
@@ -331,9 +332,19 @@ async function collectionReport(filters = {}, actor) {
       // what says whether it counts, and the summary honours that.
       collectedPrincipal: split.collectedPrincipal,
       collectedInterest: split.collectedInterest,
-      // A memo figure: the bounce charges recorded on the instalments this
-      // collection reached. Never part of `amount`, and never added to it.
-      collectedBounce: split.collectedBounce,
+      /*
+       * The instalment half of this payment (principal + interest), and the
+       * bounce half. They sum to `amount` exactly:
+       *
+       *     emiCollected + collectedBounce === amount
+       *
+       * `collectedBounce` is money the customer actually handed over against a
+       * bounce charge, read from this collection's own `bounce_amount`. It is
+       * NOT the bounce charge recorded on the instalments this payment reached
+       * — an unpaid charge shows 0.00 here for as long as it stays unpaid.
+       */
+      emiCollected: split.emiCollected,
+      collectedBounce: collection.bounceAmount,
       // Makes the POSTED/REVERSED rule explicit in the row itself.
       countsTowardTotals: posted
     };
@@ -344,7 +355,7 @@ async function collectionReport(filters = {}, actor) {
   return { collections, summary, pagination: pagination(currentPage, pageSize, count) };
 }
 
-const EMPTY_BREAKDOWN = Object.freeze({ collectedPrincipal: '0.00', collectedInterest: '0.00', collectedBounce: '0.00' });
+const EMPTY_BREAKDOWN = Object.freeze({ collectedPrincipal: '0.00', collectedInterest: '0.00', emiCollected: '0.00' });
 
 /** Totals split by status: only POSTED money counts. */
 async function collectionReportSummary(where) {
@@ -367,9 +378,17 @@ async function collectionReportSummary(where) {
   // rule that keeps reversed money out of netCollected. AND-ed rather than
   // spread, so an explicit status filter is honoured rather than overwritten:
   // filtering to REVERSED correctly yields a zero breakdown.
-  const { totals } = await collectionAllocationService.allocationBreakdown({
-    [Op.and]: [where, { status: COLLECTION_STATUS.POSTED }]
-  });
+  const postedOnly = { [Op.and]: [where, { status: COLLECTION_STATUS.POSTED }] };
+  const { totals } = await collectionAllocationService.allocationBreakdown(postedOnly);
+
+  /*
+   * BOUNCE COLLECTION for this filtered set — money actually received against
+   * bounce charges, summed from the collections' own `bounce_amount` under the
+   * same POSTED restriction as everything else here. Nothing about the
+   * instalments' `bounce_charge` enters it, so a charge that has been assessed
+   * but not paid contributes nothing.
+   */
+  const { bounceCollection, bounceCollectionCount } = await collectionAllocationService.bounceCollected(postedOnly);
 
   return {
     totalCount: posted.count + reversed.count,
@@ -379,12 +398,23 @@ async function collectionReportSummary(where) {
     reversedCount: reversed.count,
     reversedAmount: fromPaise(reversed.amount),
     netCollected: fromPaise(posted.amount),
-    // netCollected split by what the money was applied to. Principal + interest
-    // equals the allocated total exactly; bounce sits beside them and is in
-    // neither.
+    /*
+     * netCollected split by what the money was applied to:
+     *
+     *     netCollected = emiCollected + collectedBounce
+     *     emiCollected = collectedPrincipal + collectedInterest
+     *
+     * Principal and interest are apportioned from the allocation ledger, so
+     * they add up to the allocated total exactly; bounce is the part of the
+     * money that was never allocated to an instalment. Every rupee received is
+     * in exactly one of the three, and none is counted twice.
+     */
+    emiCollected: totals.emiCollected,
     collectedPrincipal: totals.collectedPrincipal,
     collectedInterest: totals.collectedInterest,
-    collectedBounce: totals.collectedBounce
+    collectedBounce: bounceCollection,
+    // How many of those collections carried any bounce at all.
+    bounceCollectionCount
   };
 }
 
@@ -397,9 +427,11 @@ const emptyCollectionReport = (page, limit) => ({
     reversedCount: 0,
     reversedAmount: '0.00',
     netCollected: '0.00',
+    emiCollected: '0.00',
     collectedPrincipal: '0.00',
     collectedInterest: '0.00',
-    collectedBounce: '0.00'
+    collectedBounce: '0.00',
+    bounceCollectionCount: 0
   },
   pagination: pagination(page, limit, 0)
 });
@@ -574,7 +606,13 @@ const emptyEmiReport = (page, limit, asOf) => ({
  *   collectedAgainstDemand — what has already been paid against those instalments
  *   netDemand              — what is still owed on them  (gross − collected)
  *   collectedInPeriod      — POSTED collections dated in the period, whatever
- *                            instalment they were applied to
+ *                            instalment they were applied to; the FULL amount
+ *                            received, so it includes any bounce component
+ *   emiCollectedInPeriod   — the instalment half of that money
+ *   bounceCollectedInPeriod— the bounce half: what was actually received
+ *                            against bounce charges. Never compared against
+ *                            demand, because demand is instalment value and a
+ *                            bounce charge is not part of an instalment.
  *
  * Demand rows come from demandService — the Phase 8 calculation is reused whole,
  * not re-derived.
@@ -624,7 +662,7 @@ async function demandCollectionReport(filters = {}, actor) {
   }
 
   const periodCollections = await Collection.findAll({
-    attributes: ['id', 'loanId', 'amount'],
+    attributes: ['id', 'loanId', 'amount', 'bounceAmount'],
     where: collectionWhere,
     raw: true
   });
@@ -645,8 +683,11 @@ async function demandCollectionReport(filters = {}, actor) {
       });
     }
     const group = groups.get(key);
+    const bouncePaise = toPaise(collection.bounceAmount ?? '0');
     group.collectionCount = (group.collectionCount ?? 0) + 1;
     group.collectedInPeriodPaise = (group.collectedInPeriodPaise ?? 0n) + toPaise(collection.amount);
+    group.bounceInPeriodPaise = (group.bounceInPeriodPaise ?? 0n) + bouncePaise;
+    group.emiInPeriodPaise = (group.emiInPeriodPaise ?? 0n) + (toPaise(collection.amount) - bouncePaise);
   }
 
   const rows = [...groups.values()].map((group) => ({
@@ -658,7 +699,10 @@ async function demandCollectionReport(filters = {}, actor) {
     collectedAgainstDemand: fromPaise(group.collectedAgainstPaise),
     netDemand: fromPaise(group.netPaise),
     collectionCount: group.collectionCount ?? 0,
-    collectedInPeriod: fromPaise(group.collectedInPeriodPaise ?? 0n)
+    collectedInPeriod: fromPaise(group.collectedInPeriodPaise ?? 0n),
+    // The two halves of collectedInPeriod, never added to it.
+    emiCollectedInPeriod: fromPaise(group.emiInPeriodPaise ?? 0n),
+    bounceCollectedInPeriod: fromPaise(group.bounceInPeriodPaise ?? 0n)
   }));
 
   rows.sort((a, b) => (a.route?.routeCode ?? 'zzz').localeCompare(b.route?.routeCode ?? 'zzz'));
@@ -677,7 +721,9 @@ async function demandCollectionReport(filters = {}, actor) {
       collectedAgainstDemand: sumField('collectedAgainstDemand'),
       netDemand: sumField('netDemand'),
       collectionCount: rows.reduce((total, row) => total + row.collectionCount, 0),
-      collectedInPeriod: sumField('collectedInPeriod')
+      collectedInPeriod: sumField('collectedInPeriod'),
+      emiCollectedInPeriod: sumField('emiCollectedInPeriod'),
+      bounceCollectedInPeriod: sumField('bounceCollectedInPeriod')
     }
   };
 }

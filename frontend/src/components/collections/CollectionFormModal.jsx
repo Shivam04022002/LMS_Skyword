@@ -40,12 +40,17 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
   const [emis, setEmis] = useState([]);
   const [allocations, setAllocations] = useState({});
   /*
-   * Manually entered bounce amounts, keyed by EMI id.
+   * BOUNCE COLLECTION — how much of this payment the customer handed over
+   * against a bounce charge rather than an instalment, entered per instalment
+   * so the operator can say which charge is being settled.
    *
-   * There is no bounce field anywhere in the backend — not on collections, not
-   * on allocations, not on instalments — so these values are captured for the
-   * operator's reference only and are deliberately NOT sent with the payload.
-   * When a bounce concept is added server-side, this map is what wires to it.
+   * Their total is posted as the collection's single `bounceAmount`, which is
+   * where the backend stores it. It is taken OUT of the amount, never added to
+   * it: the allocations must cover amount − bounce, so the bounce rupees never
+   * reach an instalment and can never be reported as principal or interest.
+   *
+   * Left empty — the default — this posts bounceAmount 0.00 and the form
+   * behaves exactly as it did before bounce existed.
    */
   const [bounces, setBounces] = useState({});
 
@@ -146,7 +151,11 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
 
   const amountMinor = toMinorUnits(form.amount) ?? 0;
   const allocatedMinor = Object.values(allocations).reduce((total, value) => total + (toMinorUnits(value) ?? 0), 0);
-  const unallocatedMinor = amountMinor - allocatedMinor;
+  const bounceMinor = Object.values(bounces).reduce((total, value) => total + (toMinorUnits(value) ?? 0), 0);
+  // What the allocations have to cover: the payment less its bounce component.
+  const emiTargetMinor = amountMinor - bounceMinor;
+  const unallocatedMinor = emiTargetMinor - allocatedMinor;
+  const bounceOverAmount = bounceMinor > amountMinor;
 
   const overAllocated = emis.filter((emi) => {
     const requested = toMinorUnits(allocations[emi.id]);
@@ -157,6 +166,8 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
     Boolean(selectedLoan) &&
     Boolean(customerId) &&
     amountMinor > 0 &&
+    !bounceOverAmount &&
+    emis.every((emi) => isBounceValid(bounces[emi.id])) &&
     unallocatedMinor === 0 &&
     overAllocated.length === 0 &&
     !submitting;
@@ -172,7 +183,8 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
     if (requiresPaymentReference(form.ledgerType) && !form.paymentReference.trim()) {
       errors.paymentReference = 'A payment reference is required for bank collections';
     }
-    if (unallocatedMinor !== 0) errors.allocations = 'Allocate the full collection amount';
+    if (bounceOverAmount) errors.amount = 'Bounce is part of the amount received, so it cannot exceed it';
+    if (unallocatedMinor !== 0) errors.allocations = 'Allocate the collection amount less its bounce component';
 
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
@@ -185,6 +197,10 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
         loanId: selectedLoan.id,
         customerId: Number(customerId),
         amount: form.amount,
+        // The bounce component of that amount, as a single figure. The
+        // allocations below are unchanged and still carry only instalment
+        // money, so the same rupee is never sent twice.
+        bounceAmount: fromMinorUnits(bounceMinor),
         collectionDate: form.collectionDate,
         ledgerType: form.ledgerType,
         paymentReference: form.paymentReference.trim() || null,
@@ -378,7 +394,8 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
                         <th scope="col" className="text-end">Collected</th>
                         <th scope="col" className="text-end">Outstanding</th>
                         <th scope="col">Status</th>
-                        <th scope="col" style={{ width: '9rem' }}>Bounce</th>
+                        <th scope="col" className="text-end">Bounce charge</th>
+                        <th scope="col" style={{ width: '9rem' }}>Bounce collected</th>
                         <th scope="col" style={{ width: '10rem' }}>Allocate</th>
                       </tr>
                     </thead>
@@ -398,6 +415,7 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
                             <td>
                               <EmiStatusBadge status={emi.status} />
                             </td>
+                            <td className="text-end small text-secondary">{formatCurrency(emi.bounceCharge)}</td>
                             <td>
                               <input
                                 className={`form-control form-control-sm${bounceValid ? '' : ' is-invalid'}`}
@@ -407,7 +425,7 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
                                 value={bounces[emi.id] ?? ''}
                                 onChange={(event) => setBounce(emi.id, event.target.value)}
                                 disabled={submitting}
-                                aria-label={`Bounce amount for instalment ${emi.emiNumber}`}
+                                aria-label={`Bounce collected for instalment ${emi.emiNumber}`}
                               />
                               {bounceValid ? null : <div className="invalid-feedback">Enter 0 or more, max 2 decimals</div>}
                             </td>
@@ -429,27 +447,46 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
                   </table>
                   <p className="form-text mb-0">
                     <i className="bi bi-info-circle me-1" aria-hidden="true" />
-                    Bounce is entered for reference while posting — it is not saved with the collection, and it does not
-                    change the allocation, the instalment or any balance.
+                    <strong>Bounce charge</strong> is what has been assessed on the instalment. Enter under{' '}
+                    <strong>Bounce collected</strong> only what the customer has actually paid towards it — it is saved as
+                    part of this collection, taken out of the amount rather than added to it, and never allocated to an
+                    instalment, so it cannot change any EMI balance, DPD or status.
                   </p>
                 </div>
               )}
 
-              <div className={`alert ${unallocatedMinor === 0 && amountMinor > 0 ? 'alert-success' : 'alert-warning'} mb-0`}>
+              {/*
+                * The reconciliation, shown as the operator types:
+                *   total received = allocated to instalments + bounce collected
+                * Every rupee is in exactly one of the two, so nothing is double
+                * counted and nothing is left unexplained.
+                */}
+              <div
+                className={`alert ${
+                  unallocatedMinor === 0 && amountMinor > 0 && !bounceOverAmount ? 'alert-success' : 'alert-warning'
+                } mb-0`}
+              >
                 <div className="row g-2 small">
-                  <div className="col-4">
-                    <div className="text-uppercase fw-semibold">Collection</div>
+                  <div className="col-6 col-md-3">
+                    <div className="text-uppercase fw-semibold">Total collection</div>
                     <div className="fw-bold">{formatCurrency(fromMinorUnits(amountMinor))}</div>
                   </div>
-                  <div className="col-4">
-                    <div className="text-uppercase fw-semibold">Allocated</div>
+                  <div className="col-6 col-md-3">
+                    <div className="text-uppercase fw-semibold">EMI allocated</div>
                     <div className="fw-bold">{formatCurrency(fromMinorUnits(allocatedMinor))}</div>
                   </div>
-                  <div className="col-4">
+                  <div className="col-6 col-md-3">
+                    <div className="text-uppercase fw-semibold">Bounce collection</div>
+                    <div className="fw-bold">{formatCurrency(fromMinorUnits(bounceMinor))}</div>
+                  </div>
+                  <div className="col-6 col-md-3">
                     <div className="text-uppercase fw-semibold">Unallocated</div>
                     <div className="fw-bold">{formatCurrency(fromMinorUnits(unallocatedMinor))}</div>
                   </div>
                 </div>
+                {bounceOverAmount ? (
+                  <div className="mt-2">Bounce collection cannot be more than the amount received.</div>
+                ) : null}
                 {fieldErrors.allocations ? <div className="mt-2">{fieldErrors.allocations}</div> : null}
               </div>
             </>

@@ -15,7 +15,16 @@ export default function CollectionSummary({ summary }) {
     { key: 'partial', label: 'Partial EMIs', value: summary.partialEmiCount, accent: 'warning', icon: 'bi-pie-chart' },
     { key: 'overdue', label: 'Overdue EMIs', value: summary.overdueEmiCount, accent: 'danger', icon: 'bi-exclamation-triangle' },
     { key: 'remaining', label: 'Remaining EMIs', value: summary.remainingEmiCount, accent: 'info', icon: 'bi-list-ol' },
-    { key: 'maxDpd', label: 'Max DPD', value: `${summary.maxDpd} day${summary.maxDpd === 1 ? '' : 's'}`, accent: 'danger', icon: 'bi-calendar-x' }
+    { key: 'maxDpd', label: 'Max DPD', value: `${summary.maxDpd} day${summary.maxDpd === 1 ? '' : 's'}`, accent: 'danger', icon: 'bi-calendar-x' },
+    /*
+     * Bounce sits beside the instalment position, never inside it: "Collected"
+     * and "Outstanding" above are instalment money only, exactly as they always
+     * were. "Bounce charge" is what has been assessed; "Bounce collection" is
+     * what has actually been received against it.
+     */
+    { key: 'bounceCharged', label: 'Bounce charge', value: formatCurrency(summary.bounceCharged), accent: 'secondary', icon: 'bi-exclamation-octagon' },
+    { key: 'bounceCollected', label: 'Bounce collection', value: formatCurrency(summary.bounceCollected), accent: 'warning', icon: 'bi-cash' },
+    { key: 'bounceOutstanding', label: 'Bounce outstanding', value: formatCurrency(summary.bounceOutstanding), accent: 'danger', icon: 'bi-hourglass' }
   ];
 
   return (

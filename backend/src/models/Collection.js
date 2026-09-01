@@ -1,7 +1,13 @@
 'use strict';
 
 const { DataTypes, Model } = require('sequelize');
-const { LEDGER_TYPE_VALUES, COLLECTION_STATUS, COLLECTION_STATUS_VALUES } = require('../config/collections');
+const {
+  LEDGER_TYPE_VALUES,
+  COLLECTION_STATUS,
+  COLLECTION_STATUS_VALUES,
+  DEFAULT_BOUNCE_AMOUNT
+} = require('../config/collections');
+const { toPaise, fromPaise } = require('../utils/money');
 
 /**
  * Money actually received from a customer.
@@ -19,11 +25,25 @@ class Collection extends Model {
     return this.status === COLLECTION_STATUS.POSTED;
   }
 
+  /**
+   * The instalment portion of this payment: `amount` minus what was collected
+   * against a bounce charge. Equals the total of this collection's allocation
+   * rows exactly — posting enforces it — so it is a read of the same money, not
+   * a second figure.
+   */
+  emiCollected() {
+    return fromPaise(toPaise(this.amount) - toPaise(this.bounceAmount ?? DEFAULT_BOUNCE_AMOUNT));
+  }
+
   toPublicJSON() {
     return {
       id: this.id,
       collectionNumber: this.collectionNumber,
+      // The TOTAL received, EMI and bounce together.
       amount: this.amount,
+      // Its two components. emiCollected + bounceCollected === amount, always.
+      emiCollected: this.emiCollected(),
+      bounceCollected: this.bounceAmount ?? DEFAULT_BOUNCE_AMOUNT,
       collectionDate: this.collectionDate,
       ledgerType: this.ledgerType,
       paymentReference: this.paymentReference,
@@ -55,7 +75,11 @@ class Collection extends Model {
     return {
       id: this.id,
       collectionNumber: this.collectionNumber,
+      // The TOTAL received, EMI and bounce together.
       amount: this.amount,
+      // Its two components. emiCollected + bounceCollected === amount, always.
+      emiCollected: this.emiCollected(),
+      bounceCollected: this.bounceAmount ?? DEFAULT_BOUNCE_AMOUNT,
       collectionDate: this.collectionDate,
       ledgerType: this.ledgerType,
       status: this.status,
@@ -85,7 +109,14 @@ module.exports = (sequelize) => {
       // The payer: any active party on the loan, not necessarily the applicant.
       customerId: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
 
+      // The total received in this transaction, EMI and bounce together.
       amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false },
+      /*
+       * How much of `amount` was collected against a bounce charge rather than
+       * an instalment. Never allocated, so it can never be reported as
+       * principal or interest and never reaches emi_schedules.amount_collected.
+       */
+      bounceAmount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: DEFAULT_BOUNCE_AMOUNT },
       collectionDate: { type: DataTypes.DATEONLY, allowNull: false },
 
       ledgerType: { type: DataTypes.ENUM(...LEDGER_TYPE_VALUES), allowNull: false },

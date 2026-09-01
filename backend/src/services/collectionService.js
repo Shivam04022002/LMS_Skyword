@@ -19,7 +19,9 @@ const { today, differenceInDays } = require('../utils/dates');
 const {
   formatCollectionNumber,
   COLLECTION_STATUS,
-  LEDGER_TYPES_REQUIRING_REFERENCE
+  LEDGER_TYPES_REQUIRING_REFERENCE,
+  DEFAULT_BOUNCE_AMOUNT,
+  emiPortionPaise
 } = require('../config/collections');
 const { LOAN_STATUS } = require('../config/loans');
 const { PARTY_STATUS } = require('../config/loanParties');
@@ -114,6 +116,34 @@ function assertCollectionDate(collectionDate, asOf = today()) {
   }
 }
 
+/**
+ * BOUNCE COLLECTION — the part of this payment that was received against a
+ * bounce charge rather than an instalment.
+ *
+ * It is taken OUT of the amount, never added on top of it: the customer handed
+ * over `amount`, and this says how that total splits. Bounce above the amount
+ * would be money the customer never paid, so it is refused.
+ *
+ * Returns the instalment portion, in paise — what the allocations must total.
+ */
+function assertBounceAmount(amount, bounceAmount = DEFAULT_BOUNCE_AMOUNT) {
+  const bouncePaise = toPaise(bounceAmount ?? DEFAULT_BOUNCE_AMOUNT);
+
+  if (bouncePaise < 0n) {
+    throw ApiError.badRequest('The bounce collection cannot be negative');
+  }
+
+  const emiPaise = emiPortionPaise(amount, bounceAmount ?? DEFAULT_BOUNCE_AMOUNT);
+  if (emiPaise < 0n) {
+    throw ApiError.badRequest(
+      `The bounce collection ${fromPaise(bouncePaise)} is more than the ${amount} received. ` +
+        'Bounce is part of the collection amount, not an addition to it.'
+    );
+  }
+
+  return emiPaise;
+}
+
 async function findCollectionOrFail(collectionId) {
   const collection = await Collection.findByPk(collectionId, { include: DETAIL_INCLUDE });
   if (!collection) {
@@ -143,7 +173,21 @@ async function findCollectionOrFail(collectionId) {
  * post a whole batch atomically.
  */
 async function createCollectionRecord(payload, actor, transaction, { asOf = today() } = {}) {
-  const { loanId, customerId, amount, collectionDate, ledgerType, paymentReference = null, notes = null, allocations } = payload;
+  const {
+    loanId,
+    customerId,
+    amount,
+    // How much of `amount` was received against a bounce charge. Absent on
+    // every existing caller — the manual form before this feature, both
+    // importers, oneBulk — and absent means 0.00, i.e. the previous behaviour
+    // exactly.
+    bounceAmount = DEFAULT_BOUNCE_AMOUNT,
+    collectionDate,
+    ledgerType,
+    paymentReference = null,
+    notes = null,
+    allocations
+  } = payload;
 
   assertPaymentReference(ledgerType, paymentReference);
   assertCollectionDate(collectionDate, asOf);
@@ -151,6 +195,11 @@ async function createCollectionRecord(payload, actor, transaction, { asOf = toda
   if (toPaise(amount) <= 0n) {
     throw ApiError.badRequest('The collection amount must be greater than zero');
   }
+
+  // The instalment portion: amount - bounce. Allocations must total this, which
+  // is what keeps bounce out of principal, interest and every EMI balance while
+  // still accounting for every rupee received.
+  const emiPaise = assertBounceAmount(amount, bounceAmount);
 
   const loan = await Loan.findByPk(loanId, { transaction, lock: transaction.LOCK.UPDATE });
   if (!loan) {
@@ -164,7 +213,7 @@ async function createCollectionRecord(payload, actor, transaction, { asOf = toda
   // current outstanding balances.
   const { planned, emiIds } = await allocationService.validateAllocations({
     allocations,
-    collectionAmount: amount,
+    collectionAmount: fromPaise(emiPaise),
     loanId: loan.id,
     transaction
   });
@@ -178,6 +227,7 @@ async function createCollectionRecord(payload, actor, transaction, { asOf = toda
       loanId: loan.id,
       customerId,
       amount,
+      bounceAmount: fromPaise(toPaise(bounceAmount ?? DEFAULT_BOUNCE_AMOUNT)),
       collectionDate,
       ledgerType,
       paymentReference: paymentReference || null,
@@ -217,6 +267,10 @@ async function createCollection(payload, actor, context, { asOf = today() } = {}
       loanId: collection.loanId,
       loanNumber: collection.Loan?.loanNumber ?? null,
       amount: collection.amount,
+      // Recorded through the existing audit mechanism, in the existing details
+      // blob: the split of the amount above, not a second amount.
+      emiCollected: collection.emiCollected(),
+      bounceCollected: collection.bounceAmount,
       ledgerType: collection.ledgerType,
       collectionDate: collection.collectionDate,
       allocations: collection.Allocations.map((allocation) => ({
@@ -273,7 +327,16 @@ async function reverseCollection(collectionId, reason, actor, context, { asOf = 
     // dates without any of it being hardcoded.
     await allocationService.recalculateEmis(emiIds, transaction, asOf);
 
-    return { collectionId: collection.id, collectionNumber: collection.collectionNumber, amount: collection.amount, emiIds };
+    return {
+      collectionId: collection.id,
+      collectionNumber: collection.collectionNumber,
+      amount: collection.amount,
+      // Reversal removes the bounce component with the rest of the payment: the
+      // row stops being POSTED, so every bounce total that filters on POSTED
+      // drops it, exactly as it drops the instalment money.
+      bounceAmount: collection.bounceAmount,
+      emiIds
+    };
   });
 
   const collection = await findCollectionOrFail(outcome.collectionId);
@@ -287,6 +350,7 @@ async function reverseCollection(collectionId, reason, actor, context, { asOf = 
       collectionNumber: outcome.collectionNumber,
       loanNumber: collection.Loan?.loanNumber ?? null,
       amount: outcome.amount,
+      bounceCollected: outcome.bounceAmount,
       affectedEmiCount: outcome.emiIds.length,
       reason: reason ?? null
     }
@@ -389,6 +453,22 @@ async function getLoanCollectionSummary(loanId, { asOf = today() } = {}) {
   const postedCount = await Collection.count({ where: { loanId, status: COLLECTION_STATUS.POSTED } });
   const reversedCount = await Collection.count({ where: { loanId, status: COLLECTION_STATUS.REVERSED } });
 
+  /*
+   * Bounce, reported beside the instalment position rather than inside it.
+   *
+   *   bounceCharged   what has been ASSESSED on this loan's instalments
+   *   bounceCollected what has actually been RECEIVED against those charges
+   *
+   * The two come from different places on purpose: the first is typed in by an
+   * operator on an instalment, the second only moves when a collection is
+   * posted. Neither touches totalRepayment, totalCollected or
+   * totalOutstanding above — those stay exactly the instalment figures they
+   * have always been.
+   */
+  const { bounceCollection } = await allocationService.bounceCollected({ loanId, status: COLLECTION_STATUS.POSTED });
+  const bounceChargedPaise = sum((emi) => emi.bounceCharge ?? '0');
+  const bounceCollectedPaise = toPaise(bounceCollection);
+
   return {
     loanNumber: loan.loanNumber,
     loanStatus: loan.status,
@@ -402,7 +482,13 @@ async function getLoanCollectionSummary(loanId, { asOf = today() } = {}) {
     remainingEmiCount: statuses.filter((status) => status !== EMI_STATUS.PAID && status !== EMI_STATUS.WAIVED).length,
     maxDpd: emis.reduce((highest, emi) => Math.max(highest, emi.computeDpd(asOf)), 0),
     postedCollectionCount: postedCount,
-    reversedCollectionCount: reversedCount
+    reversedCollectionCount: reversedCount,
+    // "Bounce Charge" is what is owed; "Bounce Collection" is what was paid.
+    bounceCharged: fromPaise(bounceChargedPaise),
+    bounceCollected: fromPaise(bounceCollectedPaise),
+    bounceOutstanding: fromPaise(
+      bounceChargedPaise - bounceCollectedPaise > 0n ? bounceChargedPaise - bounceCollectedPaise : 0n
+    )
   };
 }
 
@@ -410,6 +496,7 @@ module.exports = {
   assertLoanAcceptsCollections,
   assertPaymentReference,
   assertCollectionDate,
+  assertBounceAmount,
   createCollectionRecord,
   createCollection,
   reverseCollection,

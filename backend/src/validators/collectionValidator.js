@@ -6,6 +6,7 @@ const {
   COLLECTION_STATUS_VALUES,
   MAX_ALLOCATIONS_PER_COLLECTION
 } = require('../config/collections');
+const { toPaise } = require('../utils/money');
 
 const idParamRule = param('id').isInt({ min: 1 }).withMessage('A valid collection id is required');
 
@@ -39,6 +40,22 @@ const backendControlledRules = [
   body('amountCollected').not().exists().withMessage('Collected amounts are derived from the allocation ledger')
 ];
 
+/**
+ * True when the whole payment is bounce, so there is no instalment portion.
+ *
+ * Compared as money, not as text, so "500" and "500.00" are the same payment.
+ * A malformed amount or bounce value is never treated as bounce-only — the
+ * money rules above report it as the error it is, and the allocation rule stays
+ * in force.
+ */
+function isEntirelyBounce(body = {}) {
+  const money = /^\d+(\.\d{1,2})?$/;
+  const amount = String(body.amount ?? '');
+  const bounce = String(body.bounceAmount ?? '');
+  if (!money.test(amount) || !money.test(bounce)) return false;
+  return toPaise(amount) > 0n && toPaise(amount) === toPaise(bounce);
+}
+
 const createCollectionRules = [
   body('loanId').exists().withMessage('A loan is required').bail().isInt({ min: 1 }).withMessage('loanId must be a positive integer'),
   body('customerId')
@@ -48,6 +65,20 @@ const createCollectionRules = [
     .isInt({ min: 1 })
     .withMessage('customerId must be a positive integer'),
   moneyRule('amount', 'Collection amount'),
+  /*
+   * BOUNCE COLLECTION — optional, and part of `amount` rather than an addition
+   * to it. Absent means 0.00, which is every request the API accepted before
+   * this field existed, so no existing client has to change.
+   *
+   * Zero is allowed here (unlike `amount`): "this payment had no bounce
+   * component" is a perfectly ordinary thing for a form to send. The
+   * amount-vs-bounce comparison is enforced by the service, under the same
+   * transaction as everything else it checks.
+   */
+  body('bounceAmount')
+    .optional({ values: 'null' })
+    .custom((value) => /^\d+(\.\d{1,2})?$/.test(String(value)))
+    .withMessage('Bounce collection must be a plain number with at most 2 decimal places'),
   body('collectionDate').notEmpty().withMessage('Collection date is required').bail().isISO8601().withMessage('Collection date must be a valid date (YYYY-MM-DD)'),
   body('ledgerType')
     .notEmpty()
@@ -58,9 +89,22 @@ const createCollectionRules = [
   body('paymentReference').optional({ values: 'null' }).isString().withMessage('Payment reference must be text').bail().trim().isLength({ max: 120 }).withMessage('Payment reference is too long'),
   body('notes').optional({ values: 'null' }).isString().withMessage('Notes must be text').bail().trim().isLength({ max: 500 }).withMessage('Notes are too long'),
 
+  /*
+   * Allocations stay required, with one carved-out exception: a payment that
+   * was ENTIRELY bounce has no instalment portion, so there is nothing for it
+   * to allocate. Any payment with an instalment portion — which is every
+   * collection that omits `bounceAmount`, i.e. all of them until now — must
+   * still allocate, exactly as before.
+   */
   body('allocations')
+    .if((value, { req }) => !isEntirelyBounce(req.body))
     .isArray({ min: 1, max: MAX_ALLOCATIONS_PER_COLLECTION })
     .withMessage(`Provide between 1 and ${MAX_ALLOCATIONS_PER_COLLECTION} allocations`),
+  body('allocations')
+    .if((value, { req }) => isEntirelyBounce(req.body))
+    .optional()
+    .isArray({ max: 0 })
+    .withMessage('A payment that is entirely a bounce collection cannot be allocated to an instalment'),
   body('allocations.*.emiId').exists().withMessage('Each allocation needs an emiId').bail().isInt({ min: 1 }).withMessage('emiId must be a positive integer'),
   body('allocations.*.amount')
     .exists()

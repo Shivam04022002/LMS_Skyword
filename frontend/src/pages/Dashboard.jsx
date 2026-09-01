@@ -211,6 +211,53 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {/* ---- row 3: bounce ---- */}
+          <div className="row g-3 mb-4">
+            {/*
+              * BOUNCE COLLECTION — money actually collected against bounce
+              * charges, not the charges assessed or outstanding. Read verbatim
+              * from the API, which computes it from the collections ledger; the
+              * title attribute carries the backend's own definition so the
+              * distinction is visible on the card itself.
+              */}
+            <div className="col-6 col-xl-3">
+              <KpiCard
+                label="Bounce collection"
+                value={formatCurrency(data.collections.period.bounceCollection)}
+                period={periodLabel}
+                sub={`${data.collections.period.bounceCollectionCount} collection${data.collections.period.bounceCollectionCount === 1 ? '' : 's'} with bounce`}
+                icon="bi-exclamation-octagon"
+                accent="warning"
+                to="/reports/collections"
+              />
+            </div>
+            <div className="col-6 col-xl-3">
+              <KpiCard
+                label="Bounce collected today"
+                value={formatCurrency(data.collections.today.bounceCollection)}
+                period={formatDate(data.collections.today.date)}
+                sub={`${data.collections.today.bounceCollectionCount} collection${data.collections.today.bounceCollectionCount === 1 ? '' : 's'} with bounce`}
+                icon="bi-calendar-x"
+                accent="warning"
+                to="/reports/collections"
+              />
+            </div>
+            <div className="col-12 col-xl-6">
+              <div className="card border-0 shadow-sm h-100">
+                <div className="card-body">
+                  <div className="text-secondary text-uppercase small fw-semibold mb-1">What counts as bounce collection</div>
+                  <p className="small mb-2">{data.collections.bounceDefinition}</p>
+                  <p className="form-text mb-0">
+                    Of the {formatCurrency(data.collections.period.postedAmount)} received in this period,{' '}
+                    {formatCurrency(data.collections.period.emiCollection)} went to instalments and{' '}
+                    {formatCurrency(data.collections.period.bounceCollection)} to bounce charges. Only the instalment part
+                    counts toward collection efficiency.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* ---- route performance ---- */}
           <div className="card border-0 shadow-sm mb-4">
             <div className="card-body">
