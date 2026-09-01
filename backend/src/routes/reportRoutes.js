@@ -10,6 +10,7 @@ const { EXPORT_FORMAT_VALUES } = require('../config/reports');
 const {
   loanReportRules,
   collectionReportRules,
+  bounceCollectionReportRules,
   emiReportRules,
   demandCollectionReportRules
 } = require('../validators/reportValidator');
@@ -43,6 +44,9 @@ const report = (rules, handler) => [
 
 router.get('/loans', ...report(loanReportRules, reportController.loanReport));
 router.get('/collections', ...report(collectionReportRules, reportController.collectionReport));
+// Same permissions as every other report: reports.view to see it, and
+// reports.export additionally to download it. No new RBAC permission.
+router.get('/bounce-collections', ...report(bounceCollectionReportRules, reportController.bounceCollectionReport));
 router.get('/emis', ...report(emiReportRules, reportController.emiReport));
 router.get('/demand-collections', ...report(demandCollectionReportRules, reportController.demandCollectionReport));
 

@@ -8440,6 +8440,42 @@ async function runRules(rules, source) {
         dateColumn: 2,
         codeColumn: 1
       },
+      /*
+       * The Bounce Collection report: the same collection rows restricted to
+       * bounce_amount > 0. Total Received = EMI Collected + Bounce Collected.
+       */
+      [REPORTS.BOUNCE_COLLECTIONS]: {
+        rows: [
+          {
+            collectionNumber: 'COL26-000071',
+            collectionDate: '2026-08-19',
+            status: 'POSTED',
+            loan: { loanNumber: 'LN26-000002' },
+            customer: { fullName: 'Asha Verma', cifId: 'C000007' },
+            amount: '2500.00',
+            emiCollected: '2000.00',
+            collectedBounce: '500.00',
+            ledgerType: 'CASH',
+            paymentReference: '000452',
+            route: { routeCode: 'RT26-000001' },
+            createdBy: 'Ravi',
+            countsTowardTotals: true
+          }
+        ],
+        summary: {
+          collectedBounce: '500.00',
+          bounceCollectionCount: 1,
+          postedCount: 1,
+          postedAmount: '2500.00',
+          reversedCount: 0,
+          reversedBounce: '0.00',
+          emiCollected: '2000.00',
+          netCollected: '2500.00'
+        },
+        moneyColumn: 6,
+        dateColumn: 2,
+        codeColumn: 1
+      },
       [REPORTS.EMIS]: {
         rows: [
           {
@@ -9455,6 +9491,645 @@ async function runRules(rules, source) {
         'one column on one table'
       );
     }
+  }
+
+  // ---------- Bounce Collection report page ----------
+  {
+    const { Collection: BCollection } = models;
+    const {
+      REPORTS: BC_REPORTS,
+      CSV_COLUMNS: BC_COLUMNS,
+      SUMMARY_FIELDS: BC_SUMMARY,
+      REPORT_TITLES: BC_TITLES,
+      BOUNCE_SCOPE
+    } = require('../src/config/reports');
+    const { DEFAULT_BOUNCE_AMOUNT } = require('../src/config/collections');
+
+    const reportSrc = stripComments(
+      fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'reportService.js'), 'utf8')
+    );
+    const controllerSrc = stripComments(
+      fs.readFileSync(path.resolve(__dirname, '..', 'src', 'controllers', 'reportController.js'), 'utf8')
+    );
+    const routesSrc = stripComments(
+      fs.readFileSync(path.resolve(__dirname, '..', 'src', 'routes', 'reportRoutes.js'), 'utf8')
+    );
+
+    /* ------------------------- one implementation only ------------------------ */
+
+    record(
+      'Bounce report',
+      'the report is registered like every other report: key, title, summary fields and export columns',
+      BC_REPORTS.BOUNCE_COLLECTIONS === 'bounce-collections' &&
+        BC_TITLES[BC_REPORTS.BOUNCE_COLLECTIONS] === 'Bounce Collection Report' &&
+        Array.isArray(BC_SUMMARY[BC_REPORTS.BOUNCE_COLLECTIONS]) &&
+        BC_SUMMARY[BC_REPORTS.BOUNCE_COLLECTIONS].length > 0 &&
+        Array.isArray(BC_COLUMNS[BC_REPORTS.BOUNCE_COLLECTIONS]) &&
+        BC_COLUMNS[BC_REPORTS.BOUNCE_COLLECTIONS].length > 0,
+      BC_TITLES[BC_REPORTS.BOUNCE_COLLECTIONS]
+    );
+
+    record(
+      'Bounce report',
+      'NO SECOND IMPLEMENTATION: the service delegates to the existing collection report',
+      (() => {
+        const fn = reportSrc.slice(
+          reportSrc.indexOf('async function bounceCollectionReport'),
+          reportSrc.indexOf('const EMPTY_BREAKDOWN')
+        );
+        return (
+          /return collectionReport\(\{ \.\.\.filters, \[BOUNCE_SCOPE\]: true \}, actor\);/.test(fn) &&
+          // No query, no aggregation, no money arithmetic of its own.
+          !/findAll|findAndCountAll|sequelize\.query|toPaise|fromPaise|SUM\(/.test(fn)
+        );
+      })(),
+      'one query, one set of totals, one definition of bounce'
+    );
+
+    record(
+      'Bounce report',
+      'the bounce restriction is applied in SQL, not by filtering rows in the browser',
+      /if \(filters\[BOUNCE_SCOPE\]\) \{\s*where\.bounceAmount = \{ \[Op\.gt\]: 0 \};\s*\}/.test(reportSrc),
+      'WHERE bounce_amount > 0 — so paging and the summary see the same restricted set'
+    );
+
+    record(
+      'Bounce report',
+      'the bounce scope is a Symbol, so no query string can flip a report into the other one',
+      typeof BOUNCE_SCOPE === 'symbol' && !/bounceOnly/.test(routesSrc),
+      String(BOUNCE_SCOPE)
+    );
+
+    record(
+      'Bounce report',
+      'bounce comes from collections.bounce_amount — the instalment bounce_charge is never read',
+      (() => {
+        const columns = BC_COLUMNS[BC_REPORTS.BOUNCE_COLLECTIONS];
+        const bounce = columns.find((c) => c.header === 'Bounce Collected');
+        const summaryBounce = BC_SUMMARY[BC_REPORTS.BOUNCE_COLLECTIONS].find((f) => f.label === 'Bounce Collected');
+        return (
+          bounce?.path === 'collectedBounce' &&
+          bounce?.type === 'money' &&
+          summaryBounce?.path === 'collectedBounce' &&
+          !columns.some((c) => /bounceCharge/.test(String(c.path))) &&
+          !BC_SUMMARY[BC_REPORTS.BOUNCE_COLLECTIONS].some((f) => /bounceCharge/.test(String(f.path)))
+        );
+      })(),
+      'collectedBounce (= collections.bounce_amount) everywhere'
+    );
+
+    record(
+      'Bounce report',
+      'the export carries exactly the requested columns, in order',
+      BC_COLUMNS[BC_REPORTS.BOUNCE_COLLECTIONS].map((c) => c.header).join(' | ') ===
+        'Collection Number | Collection Date | Loan Number | Customer | CIFID | Total Received | EMI Collected | Bounce Collected | Ledger | Reference | Route | Collected By | Status | Counts Toward Totals',
+      BC_COLUMNS[BC_REPORTS.BOUNCE_COLLECTIONS].map((c) => c.header).join(', ')
+    );
+
+    /* ------------------------ wiring, permissions, scope ----------------------- */
+
+    record(
+      'Bounce report',
+      'the controller reuses the shared report handler — same JSON/CSV/Excel path as every report',
+      /const bounceCollectionReport = reportHandler\(\{\s*key: REPORTS\.BOUNCE_COLLECTIONS,\s*run: reportService\.bounceCollectionReport,\s*rowsOf: \(data\) => data\.collections\s*\}\);/.test(
+        controllerSrc
+      ),
+      'no bespoke export implementation'
+    );
+
+    record(
+      'Bounce report',
+      'the route is mounted through the same permission gate — no new RBAC permission was invented',
+      /router\.get\('\/bounce-collections', \.\.\.report\(bounceCollectionReportRules, reportController\.bounceCollectionReport\)\);/.test(
+        routesSrc
+      ) &&
+        // `report()` applies reports.view, then validation, then the export gate.
+        /requirePermission\(PERMISSIONS\.REPORTS_VIEW\)/.test(routesSrc) &&
+        /requirePermission\(PERMISSIONS\.REPORTS_EXPORT\)/.test(routesSrc) &&
+        // No report-scoped bounce permission was invented. `emis.bounce_charge`
+        // predates this page (it governs recording the ASSESSED charge on an
+        // instalment) and is deliberately untouched.
+        PERMISSION_DEFINITIONS.filter((p) => p.name.startsWith('reports.'))
+          .map((p) => p.name)
+          .sort()
+          .join(',') === 'reports.export,reports.view' &&
+        !PERMISSION_DEFINITIONS.some((p) => /bounce/i.test(p.name) && p.name !== PERMISSIONS.EMIS_BOUNCE_CHARGE),
+      'reports.view to see it, reports.export to download it'
+    );
+
+    {
+      const reportRouter = require('../src/routes/reportRoutes');
+      const paths = reportRouter.stack.filter((l) => l.route).map((l) => l.route.path);
+      const methods = reportRouter.stack.filter((l) => l.route).flatMap((l) => Object.keys(l.route.methods));
+      record(
+        'Bounce report',
+        'the endpoint exists, is GET-only, and the existing report routes are untouched',
+        paths.includes('/bounce-collections') &&
+          ['/loans', '/collections', '/emis', '/demand-collections'].every((p) => paths.includes(p)) &&
+          [...new Set(methods)].join(',') === 'get',
+        paths.join(' | ')
+      );
+    }
+
+    record(
+      'Bounce report',
+      'the validator reuses the collection report rules rather than restating them',
+      (() => {
+        const v = require('../src/validators/reportValidator');
+        return v.bounceCollectionReportRules === v.collectionReportRules;
+      })(),
+      'same paging, scope, format, date, status, ledger and search rules'
+    );
+
+    {
+      // 7 & 8: date, route and collector filters reach the query unchanged,
+      // because the wrapper passes `filters` straight through and the shared
+      // report already applies them.
+      const v = require('../src/validators/reportValidator');
+      const bad = await runRules(v.bounceCollectionReportRules, {
+        query: { dateFrom: '2026-02-30', routeId: '0', collectorId: 'abc', status: 'CANCELLED', limit: '9999' }
+      });
+      const fields = bad.map((e) => e.field);
+      const good = await runRules(v.bounceCollectionReportRules, {
+        query: { dateFrom: '2026-08-01', dateTo: '2026-08-31', routeId: '3', collectorId: '7', status: 'POSTED' }
+      });
+      record(
+        'Bounce report',
+        '7/8. date, route, collector, status and paging filters are validated like every other report',
+        ['dateFrom', 'routeId', 'collectorId', 'status', 'limit'].every((f) => fields.includes(f)) && good.length === 0,
+        `rejected: ${fields.join(', ')}`
+      );
+    }
+
+    record(
+      'Bounce report',
+      'a collector stays confined to their own routes — the shared scope resolver is not bypassed',
+      /const scope = await resolveScope\(actor, filters\);/.test(
+        reportSrc.slice(reportSrc.indexOf('async function collectionReport'), reportSrc.indexOf('const EMPTY_BREAKDOWN'))
+      ),
+      'same resolveScope guard as the collection report'
+    );
+
+    /* ------------------------------- the totals ------------------------------- */
+
+    record(
+      'Bounce report',
+      'reversed bounce is opt-in, so the collection report and the dashboard pay nothing for it',
+      /includeBounceDetail = false/.test(reportSrc) &&
+        /includeBounceDetail: Boolean\(filters\[BOUNCE_SCOPE\]\)/.test(reportSrc) &&
+        /\.\.\.\(includeBounceDetail \? \{ reversedBounce \} : \{\}\)/.test(reportSrc),
+      'only the bounce page asks for reversedBounce'
+    );
+
+    record(
+      'Bounce report',
+      'reversed bounce is computed with the same POSTED/REVERSED rule, from the same helper',
+      /bounceCollected\(\{ \[Op\.and\]: \[where, \{ status: COLLECTION_STATUS\.REVERSED \}\] \}\)/.test(reportSrc),
+      'collectionAllocationService.bounceCollected, filtered to REVERSED'
+    );
+  }
+
+
+  // ---------- Bounce Collection report: the data rule ----------
+  {
+    const { Collection: BCollection } = models;
+    const { DEFAULT_BOUNCE_AMOUNT } = require('../src/config/collections');
+
+    /** A collection exactly as stored; emiCollected() is the model's own method. */
+    const build = ({ amount, bounce = DEFAULT_BOUNCE_AMOUNT, date = '2026-08-18', status = COLLECTION_STATUS.POSTED }) =>
+      BCollection.build({
+        collectionNumber: 'COL26-000001',
+        loanId: 1,
+        customerId: 1,
+        amount,
+        bounceAmount: bounce,
+        collectionDate: date,
+        ledgerType: LEDGER_TYPES.CASH,
+        status
+      });
+
+    /*
+     * What the endpoint does, expressed the way the SQL does it:
+     *   WHERE bounce_amount > 0  (the page's defining filter)
+     *   AND   collection_date BETWEEN from AND to
+     * Totals count POSTED rows only; REVERSED rows stay visible but contribute
+     * nothing — the same rule every other collected total obeys.
+     */
+    const page = (ledger, { from, to, status } = {}) => {
+      const rows = ledger.filter(
+        (c) =>
+          toPaise(c.bounceAmount) > 0n &&
+          (!from || c.collectionDate >= from) &&
+          (!to || c.collectionDate <= to) &&
+          (!status || c.status === status)
+      );
+      const posted = rows.filter((c) => c.status === COLLECTION_STATUS.POSTED);
+      const reversed = rows.filter((c) => c.status === COLLECTION_STATUS.REVERSED);
+      const sum = (list, pick) => fromPaise(list.reduce((t, c) => t + toPaise(pick(c)), 0n));
+      return {
+        rows,
+        summary: {
+          collectedBounce: sum(posted, (c) => c.bounceAmount),
+          bounceCollectionCount: posted.length,
+          postedCount: posted.length,
+          postedAmount: sum(posted, (c) => c.amount),
+          reversedCount: reversed.length,
+          reversedBounce: sum(reversed, (c) => c.bounceAmount),
+          emiCollected: sum(posted, (c) => c.emiCollected()),
+          netCollected: sum(posted, (c) => c.amount)
+        }
+      };
+    };
+
+    // Case 1 — a collection with no bounce is not a bounce collection.
+    {
+      const ledger = [build({ amount: '1000.00' }), build({ amount: '1500.00', bounce: '500.00' })];
+      const p = page(ledger);
+      record(
+        'Bounce report',
+        '1. a collection with 0.00 bounce does NOT appear on the page',
+        p.rows.length === 1 && toPaise(p.rows[0].bounceAmount) === toPaise('500.00'),
+        `${ledger.length} collections, ${p.rows.length} bounce collection`
+      );
+    }
+
+    // Case 2 — the stated data rule, to the paise.
+    {
+      const c = build({ amount: '2000.00', bounce: '500.00' });
+      record(
+        'Bounce report',
+        '2. total 2000 with 500 bounce -> Total Received 2000, EMI Collected 1500, Bounce Collected 500',
+        c.amount === '2000.00' &&
+          c.emiCollected() === '1500.00' &&
+          c.bounceAmount === '500.00' &&
+          toPaise(c.emiCollected()) + toPaise(c.bounceAmount) === toPaise(c.amount),
+        `${c.emiCollected()} + ${c.bounceAmount} = ${c.amount}`
+      );
+    }
+
+    // Case 3 — several bounce collections sum correctly.
+    {
+      const p = page([
+        build({ amount: '1500.00', bounce: '500.00', date: '2026-08-10' }),
+        build({ amount: '1200.00', bounce: '200.00', date: '2026-08-11' }),
+        build({ amount: '2350.00', bounce: '350.00', date: '2026-08-12' })
+      ]);
+      record(
+        'Bounce report',
+        '3. multiple bounce collections total correctly, and the components reconcile',
+        p.summary.collectedBounce === '1050.00' &&
+          p.summary.bounceCollectionCount === 3 &&
+          p.summary.emiCollected === '4000.00' &&
+          p.summary.netCollected === '5050.00' &&
+          toPaise(p.summary.emiCollected) + toPaise(p.summary.collectedBounce) === toPaise(p.summary.netCollected),
+        `bounce=${p.summary.collectedBounce} emi=${p.summary.emiCollected} total=${p.summary.netCollected}`
+      );
+    }
+
+    // Case 4 — reversed rows are visible but never counted.
+    {
+      const ledger = [
+        build({ amount: '1500.00', bounce: '500.00' }),
+        build({ amount: '1200.00', bounce: '200.00', status: COLLECTION_STATUS.REVERSED })
+      ];
+      const all = page(ledger);
+      const onlyReversed = page(ledger, { status: COLLECTION_STATUS.REVERSED });
+      record(
+        'Bounce report',
+        '4. a reversed bounce collection stays visible but is excluded from collected totals',
+        all.rows.length === 2 &&
+          all.summary.collectedBounce === '500.00' &&
+          all.summary.reversedCount === 1 &&
+          all.summary.reversedBounce === '200.00' &&
+          onlyReversed.rows.length === 1 &&
+          onlyReversed.summary.collectedBounce === '0.00',
+        `visible=${all.rows.length} counted=${all.summary.collectedBounce} reversed(excluded)=${all.summary.reversedBounce}`
+      );
+    }
+
+    // Case 5 — an assessed charge is not a collection.
+    {
+      const assessed = EmiSchedule.build({
+        loanId: 1,
+        emiNumber: 1,
+        emiDate: '2026-08-10',
+        emiAmount: '1000.00',
+        principal: '900.00',
+        interest: '100.00',
+        bounceCharge: '500.00',
+        amountCollected: '1000.00'
+      });
+      const p = page([build({ amount: '1000.00' })]);
+      record(
+        'Bounce report',
+        '5. a 500.00 bounce charge assessed but never paid produces NO row and NO collected bounce',
+        toPaise(assessed.bounceCharge) === toPaise('500.00') &&
+          p.rows.length === 0 &&
+          p.summary.collectedBounce === '0.00',
+        `charge=${assessed.bounceCharge} rows=${p.rows.length} collected=${p.summary.collectedBounce}`
+      );
+    }
+
+    // Case 6 — bounce never enters the principal / interest split.
+    {
+      const c = build({ amount: '1500.00', bounce: '500.00' });
+      const { principalPaise, interestPaise } = allocationService.splitAllocation({
+        allocatedPaise: toPaise(c.emiCollected()),
+        principalPaise: toPaise('900.00'),
+        emiAmountPaise: toPaise('1000.00')
+      });
+      record(
+        'Bounce report',
+        '6. a collection with bounce does not increase EMI principal or interest',
+        principalPaise === toPaise('900.00') &&
+          interestPaise === toPaise('100.00') &&
+          principalPaise + interestPaise === toPaise(c.emiCollected()) &&
+          principalPaise + interestPaise !== toPaise(c.amount),
+        `p=${fromPaise(principalPaise)} i=${fromPaise(interestPaise)} sum=${fromPaise(principalPaise + interestPaise)} (not ${c.amount})`
+      );
+    }
+
+    // Case 7 — the date filter bounds the rows and the totals together.
+    {
+      const ledger = [
+        build({ amount: '1500.00', bounce: '500.00', date: '2026-08-10' }),
+        build({ amount: '1200.00', bounce: '200.00', date: '2026-09-05' })
+      ];
+      const august = page(ledger, { from: '2026-08-01', to: '2026-08-31' });
+      const september = page(ledger, { from: '2026-09-01', to: '2026-09-30' });
+      const both = page(ledger, { from: '2026-08-01', to: '2026-09-30' });
+      record(
+        'Bounce report',
+        '7. the date filter limits bounce records, and the periods add back up',
+        august.rows.length === 1 &&
+          august.summary.collectedBounce === '500.00' &&
+          september.summary.collectedBounce === '200.00' &&
+          both.summary.collectedBounce === '700.00' &&
+          toPaise(august.summary.collectedBounce) + toPaise(september.summary.collectedBounce) ===
+            toPaise(both.summary.collectedBounce),
+        `Aug=${august.summary.collectedBounce} Sep=${september.summary.collectedBounce} both=${both.summary.collectedBounce}`
+      );
+    }
+
+    // Case 10 — the existing collection report is unchanged.
+    {
+      const { CSV_COLUMNS: R_COLUMNS, SUMMARY_FIELDS: R_SUMMARY, REPORTS: R_REPORTS } = require('../src/config/reports');
+      const headers = R_COLUMNS[R_REPORTS.COLLECTIONS].map((c) => c.header);
+      const amountIndex = headers.indexOf('Amount');
+      record(
+        'Bounce report',
+        '10. the existing Collection report keeps its own columns, order and summary fields',
+        headers.slice(amountIndex + 1, amountIndex + 4).join('|') === 'Collected Principal|Collected Interest|Collected Bounce' &&
+          headers.includes('EMI Collected') &&
+          R_SUMMARY[R_REPORTS.COLLECTIONS].some((f) => f.label === 'Net Collected') &&
+          // The bounce page did not add its fields to the collection report.
+          !R_SUMMARY[R_REPORTS.COLLECTIONS].some((f) => f.label === 'Total Received'),
+        'collection report untouched'
+      );
+    }
+  }
+
+
+  // ---------- Bounce Collection page: sidebar, routing and UI ----------
+  {
+    const front = (...segments) => path.resolve(__dirname, '..', '..', 'frontend', 'src', ...segments);
+    const navSrc = stripComments(fs.readFileSync(front('routes', 'navigation.js'), 'utf8'));
+    const appRoutesSrc = stripComments(fs.readFileSync(front('routes', 'AppRoutes.jsx'), 'utf8'));
+    const pageSrc = stripComments(fs.readFileSync(front('pages', 'reports', 'BounceCollectionReportPage.jsx'), 'utf8'));
+    const constantsSrc = stripComments(fs.readFileSync(front('utils', 'reportConstants.js'), 'utf8'));
+
+    /* -------------------------------- sidebar -------------------------------- */
+
+    const operations = navSrc.slice(navSrc.indexOf("id: 'operations'"), navSrc.indexOf("id: 'temporary'"));
+    const opLabels = [...operations.matchAll(/label: '([^']+)'/g)].map((m) => m[1]).filter((l) => l !== 'Operations');
+
+    record(
+      'Bounce page',
+      'Bounce Collection sits DIRECTLY BELOW Demand vs collection, in Operations',
+      opLabels[opLabels.indexOf('Demand vs collection') + 1] === 'Bounce Collection' &&
+        opLabels[opLabels.length - 1] === 'Bounce Collection',
+      opLabels.join(' > ')
+    );
+
+    record(
+      'Bounce page',
+      'the whole Operations order is exactly as specified, and nothing was renamed or moved',
+      opLabels.join('|') ===
+        'Dashboard|Customers|Loans|Collections|Routes|Demand|Loan report|Collection report|EMI report|Demand vs collection|Bounce Collection',
+      opLabels.join(' | ')
+    );
+
+    record(
+      'Bounce page',
+      'it is NOT in the Temporary section, which still contains only oneBulk',
+      (() => {
+        const temporary = navSrc.slice(navSrc.indexOf("id: 'temporary'"), navSrc.indexOf("id: 'administration'"));
+        const labels = [...temporary.matchAll(/label: '([^']+)'/g)].map((m) => m[1]).filter((l) => l !== 'Temporary');
+        return labels.join('|') === 'oneBulk (temporary)' && !/Bounce/.test(temporary);
+      })(),
+      'Temporary: oneBulk (temporary)'
+    );
+
+    record(
+      'Bounce page',
+      'the nav entry is gated by the existing reports.view permission',
+      /id: 'report-bounce-collections'[\s\S]{0,220}permission: \[PERMISSIONS\.REPORTS_VIEW\]/.test(navSrc),
+      'no new permission constant'
+    );
+
+    /* -------------------------------- routing -------------------------------- */
+
+    record(
+      'Bounce page',
+      'the route is registered behind the reports.view guard, alongside the other report pages',
+      /<Route path="\/reports\/bounce-collections" element=\{<BounceCollectionReportPage \/>\} \/>/.test(appRoutesSrc) &&
+        (() => {
+          const guard = appRoutesSrc.slice(appRoutesSrc.indexOf('anyOf={[PERMISSIONS.REPORTS_VIEW]}'));
+          return guard.indexOf('/reports/bounce-collections') < guard.indexOf('</Route>');
+        })(),
+      '/reports/bounce-collections'
+    );
+
+    record(
+      'Bounce page',
+      'the report key mirrors the backend and the path matches the nav entry',
+      /BOUNCE_COLLECTIONS: 'bounce-collections'/.test(constantsSrc) &&
+        /path: '\/reports\/bounce-collections'/.test(constantsSrc) &&
+        /path: '\/reports\/bounce-collections'/.test(navSrc),
+      'frontend REPORTS mirrors backend config/reports.js'
+    );
+
+    /* ------------------------------ header + toolbar --------------------------- */
+
+    record(
+      'Bounce page',
+      'the header carries the requested title and subtitle, with Export Excel / Refresh / Reset',
+      /title="Bounce Collection"/.test(pageSrc) &&
+        /description="Track bounce charges actually collected with EMI payments\."/.test(pageSrc) &&
+        /exportFormat="xlsx"/.test(pageSrc) &&
+        /reportKey=\{REPORTS\.BOUNCE_COLLECTIONS\}/.test(pageSrc) &&
+        /onRefresh=\{load\}/.test(pageSrc) &&
+        /onReset=\{\(\) => setFilters\(EMPTY\)\}/.test(pageSrc),
+      'ReportToolbar supplies all three buttons, as on every report page'
+    );
+
+    record(
+      'Bounce page',
+      'the export sends the SAME filters the screen is showing',
+      /filters=\{query\}/.test(pageSrc) && /const query = \{ \.\.\.filters, search: debouncedSearch \}/.test(pageSrc),
+      'the file cannot diverge from the page'
+    );
+
+    /* --------------------------------- filters -------------------------------- */
+
+    record(
+      'Bounce page',
+      'all six filters are present: collection number, status, route, collector, from and to',
+      ['bc-search', 'bc-status', 'bc-route', 'bc-collector', 'bc-from', 'bc-to'].every((id) =>
+        new RegExp(`id="${id}"`).test(pageSrc)
+      ) &&
+        /const EMPTY = \{ status: '', routeId: '', collectorId: '', dateFrom: '', dateTo: '', search: '' \}/.test(pageSrc),
+      'collection number, status, route, collector, from, to'
+    );
+
+    record(
+      'Bounce page',
+      'filters are sent to the server, and paging resets when they change',
+      /getBounceCollectionReport\(\{ \.\.\.query, page, limit: DEFAULT_PAGE_SIZE \}\)/.test(pageSrc) &&
+        /setPage\(1\);[\s\S]{0,140}filters\.status, filters\.routeId, filters\.collectorId, filters\.dateFrom, filters\.dateTo/.test(
+          pageSrc
+        ),
+      'server-side filtering and paging'
+    );
+
+    /* --------------------------------- KPI cards ------------------------------- */
+
+    record(
+      'Bounce page',
+      'all six KPI cards are present and read the backend summary verbatim',
+      [
+        ["label: 'Bounce collected'", 'summary.collectedBounce'],
+        ["label: 'Bounce collections'", 'summary.bounceCollectionCount'],
+        ["label: 'Posted'", 'summary.postedCount'],
+        ["label: 'Reversed'", 'summary.reversedCount'],
+        ["label: 'EMI collected with bounce'", 'summary.emiCollected'],
+        ["label: 'Total received'", 'summary.netCollected']
+      ].every(([label, field]) => pageSrc.includes(label) && pageSrc.includes(field)),
+      'bounce collected, count, posted, reversed, EMI with bounce, total received'
+    );
+
+    record(
+      'Bounce page',
+      'the headline card states plainly that this is money received, not charges assessed',
+      /label: 'Bounce collected'[\s\S]{0,260}actually received — not charges assessed/.test(pageSrc),
+      'stated on the card itself'
+    );
+
+    record(
+      'Bounce page',
+      'the reversed card names the bounce it is excluding from the totals',
+      /label: 'Reversed'[\s\S]{0,260}summary\.reversedBounce[\s\S]{0,120}excluded from totals/.test(pageSrc),
+      'reversed bounce shown, and shown as excluded'
+    );
+
+    record(
+      'Bounce page',
+      'the page performs no arithmetic of its own — every figure is formatted, never computed',
+      !/summary\.\w+\s*[-+*/]\s*summary\.\w+/.test(pageSrc) && !/Number\(summary\./.test(pageSrc),
+      'formatCurrency only'
+    );
+
+    /* ---------------------------------- table --------------------------------- */
+
+    record(
+      'Bounce page',
+      'the table declares exactly the requested columns, in order',
+      (() => {
+        const head = (pageSrc.match(/<thead[\s\S]*?<\/thead>/) ?? [''])[0];
+        const headers = [...head.matchAll(/<th[^>]*>([^<]+)<\/th>/g)].map((m) => m[1].trim());
+        return (
+          headers.join('|') ===
+          'Collection|Date|Loan|Customer|CIFID|Total Received|EMI Collected|Bounce Collected|Ledger|Reference|Route|Collected By|Status|Receipt'
+        );
+      })(),
+      'Collection ... Bounce Collected ... Receipt'
+    );
+
+    record(
+      'Bounce page',
+      'the row values come from the API fields, never recomputed from EMI data',
+      /formatCurrency\(c\.amount\)/.test(pageSrc) &&
+        /formatCurrency\(c\.emiCollected\)/.test(pageSrc) &&
+        /formatCurrency\(c\.collectedBounce\)/.test(pageSrc) &&
+        // Nothing on the page touches an assessed bounce charge.
+        !/bounceCharge/.test(pageSrc),
+      'amount / emiCollected / collectedBounce'
+    );
+
+    record(
+      'Bounce page',
+      'Bounce Collected is the visually prominent column, because it is the point of the page',
+      /className=\{`text-end fw-bold \$\{c\.countsTowardTotals \? 'text-warning-emphasis' : 'text-decoration-line-through'\}`\}[\s\S]{0,120}formatCurrency\(c\.collectedBounce\)/.test(
+        pageSrc
+      ),
+      'bold and accented, struck through when it does not count'
+    );
+
+    record(
+      'Bounce page',
+      'the colSpan matches the column count, so the loading and empty rows span the table',
+      (() => {
+        const headerCount = (pageSrc.match(/<th scope="col"/g) ?? []).length;
+        const colSpans = [...pageSrc.matchAll(/colSpan="(\d+)"/g)].map((m) => Number(m[1]));
+        return colSpans.length > 0 && colSpans.every((span) => span === headerCount);
+      })(),
+      `${(pageSrc.match(/<th scope="col"/g) ?? []).length} columns`
+    );
+
+    record(
+      'Bounce page',
+      'the collection number reuses the EXISTING collection details page — no second implementation',
+      /to=\{`\/collections\/\$\{c\.id\}`\}/.test(pageSrc) &&
+        /to=\{`\/collections\/\$\{c\.id\}\/receipt`\}/.test(pageSrc) &&
+        !/CollectionDetails|useParams/.test(pageSrc),
+      'links to /collections/:id and /collections/:id/receipt'
+    );
+
+    /* ------------------------------- empty state ------------------------------- */
+
+    record(
+      'Bounce page',
+      'the empty state says what it means, and does not present assessed charges as records',
+      /No bounce collections found/.test(pageSrc) &&
+        /Bounce collection appears here only when an actual bounce amount has been collected with a posted\s+collection\./.test(
+          pageSrc
+        ) &&
+        /assessed but not paid are not shown/.test(pageSrc),
+      '"No bounce collections found" + the explanation'
+    );
+
+    record(
+      'Bounce page',
+      'the page explains the assessed-vs-collected distinction above the table',
+      /Bounce collected is money received, not money owed/.test(pageSrc) && /bounce outstanding/i.test(pageSrc),
+      'stated in the info banner'
+    );
+
+    /* ------------------------- existing pages untouched ------------------------ */
+
+    record(
+      'Bounce page',
+      'the existing Collection report page was not modified by this change',
+      (() => {
+        const collectionReportPage = stripComments(fs.readFileSync(front('pages', 'reports', 'CollectionReportPage.jsx'), 'utf8'));
+        return (
+          /title="Collection report"/.test(collectionReportPage) &&
+          /reportKey=\{REPORTS\.COLLECTIONS\}/.test(collectionReportPage) &&
+          !/BOUNCE_COLLECTIONS/.test(collectionReportPage)
+        );
+      })(),
+      'Collection report still points at its own report key'
+    );
   }
 
   // ---------- Frontend action wiring ----------

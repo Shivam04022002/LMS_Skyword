@@ -95,6 +95,15 @@ export const NAV_SECTIONS = [
         permission: [PERMISSIONS.REPORTS_VIEW],
         roles: [],
         available: true
+      },
+      {
+        id: 'report-bounce-collections',
+        label: 'Bounce Collection',
+        path: '/reports/bounce-collections',
+        icon: 'bi-exclamation-octagon',
+        permission: [PERMISSIONS.REPORTS_VIEW],
+        roles: [],
+        available: true
       }
     ]
   },

@@ -58,6 +58,14 @@ const collectionReportRules = [
   query('search').optional().isString().trim().isLength({ max: 120 }).withMessage('search is too long')
 ];
 
+/*
+ * The Bounce Collection report takes the same inputs as the collection report —
+ * it IS the collection report with `bounce_amount > 0` applied server-side — so
+ * it reuses the same rules rather than restating them. Aliased for readability
+ * at the route, and so the two can diverge later without a rewrite.
+ */
+const bounceCollectionReportRules = collectionReportRules;
+
 const emiReportRules = [
   ...pagingRules,
   ...scopeRules,
@@ -83,6 +91,7 @@ const receiptRules = [param('id').isInt({ min: 1 }).withMessage('A valid collect
 module.exports = {
   loanReportRules,
   collectionReportRules,
+  bounceCollectionReportRules,
   emiReportRules,
   demandCollectionReportRules,
   receiptRules

@@ -12,7 +12,15 @@ const REPORTS = Object.freeze({
   LOANS: 'loans',
   COLLECTIONS: 'collections',
   EMIS: 'emis',
-  DEMAND_COLLECTIONS: 'demand-collections'
+  DEMAND_COLLECTIONS: 'demand-collections',
+  /*
+   * Bounce collection — the same collection rows as REPORTS.COLLECTIONS, with
+   * `bounce_amount > 0` applied in SQL. It is a distinct report key rather than
+   * a filter on the collection report because it needs its own title, its own
+   * export columns and its own Summary sheet; the DATA still comes from the one
+   * collection query, so there is no second bounce calculation anywhere.
+   */
+  BOUNCE_COLLECTIONS: 'bounce-collections'
 });
 
 const REPORT_VALUES = Object.values(REPORTS);
@@ -60,6 +68,22 @@ const SUMMARY_FIELDS = Object.freeze({
     { label: 'Collected', path: 'totalCollected', type: 'money' },
     { label: 'Outstanding', path: 'totalOutstanding', type: 'money' }
   ],
+  /*
+   * Every figure below is bounce-scoped, because the rows it summarises are.
+   *   Total Received = EMI Collected With Bounce + Bounce Collected
+   * Reversed rows stay visible in the table but are excluded from Bounce
+   * Collected, exactly as they are excluded from every other collected total.
+   */
+  [REPORTS.BOUNCE_COLLECTIONS]: [
+    { label: 'Bounce Collected', path: 'collectedBounce', type: 'money' },
+    { label: 'Bounce Collections', path: 'bounceCollectionCount', type: 'number' },
+    { label: 'Posted', path: 'postedCount', type: 'number' },
+    { label: 'Posted Amount', path: 'postedAmount', type: 'money' },
+    { label: 'Reversed', path: 'reversedCount', type: 'number' },
+    { label: 'Reversed Bounce (excluded)', path: 'reversedBounce', type: 'money' },
+    { label: 'EMI Collected With Bounce', path: 'emiCollected', type: 'money' },
+    { label: 'Total Received', path: 'netCollected', type: 'money' }
+  ],
   [REPORTS.DEMAND_COLLECTIONS]: [
     { label: 'As Of', path: 'asOf' },
     { label: 'Routes', path: 'routeCount', type: 'number' },
@@ -77,7 +101,8 @@ const REPORT_TITLES = Object.freeze({
   [REPORTS.LOANS]: 'Loan Report',
   [REPORTS.COLLECTIONS]: 'Collection Report',
   [REPORTS.EMIS]: 'EMI Report',
-  [REPORTS.DEMAND_COLLECTIONS]: 'Demand vs Collection Report'
+  [REPORTS.DEMAND_COLLECTIONS]: 'Demand vs Collection Report',
+  [REPORTS.BOUNCE_COLLECTIONS]: 'Bounce Collection Report'
 });
 
 /**
@@ -98,6 +123,17 @@ const MAX_LIMIT = 200;
  * reports.export permission.
  */
 const EXPORT_SCOPE = Symbol('report.export');
+
+/**
+ * Restricts a collection query to rows that actually carry bounce money
+ * (`bounce_amount > 0`), in SQL.
+ *
+ * A Symbol for the same reason EXPORT_SCOPE is one: it cannot arrive from a
+ * query string, so no caller can turn the ordinary collection report into the
+ * bounce report (or the reverse) by guessing a parameter name. Only
+ * `bounceCollectionReport` sets it.
+ */
+const BOUNCE_SCOPE = Symbol('report.bounceOnly');
 
 /**
  * CSV column definitions per report.
@@ -167,6 +203,27 @@ const CSV_COLUMNS = Object.freeze({
     { header: 'Route Code', path: 'route.routeCode', type: 'code' },
     { header: 'Collectors', path: 'collectorNames' }
   ],
+  /*
+   * Bounce Collected here is `collections.bounce_amount` — money actually
+   * received — never `emi_schedules.bounce_charge`, which is only what was
+   * assessed. Total Received = EMI Collected + Bounce Collected, per row.
+   */
+  [REPORTS.BOUNCE_COLLECTIONS]: [
+    { header: 'Collection Number', path: 'collectionNumber', type: 'code' },
+    { header: 'Collection Date', path: 'collectionDate', type: 'date' },
+    { header: 'Loan Number', path: 'loan.loanNumber', type: 'code' },
+    { header: 'Customer', path: 'customer.fullName' },
+    { header: 'CIFID', path: 'customer.cifId', type: 'code' },
+    { header: 'Total Received', path: 'amount', type: 'money' },
+    { header: 'EMI Collected', path: 'emiCollected', type: 'money' },
+    { header: 'Bounce Collected', path: 'collectedBounce', type: 'money' },
+    { header: 'Ledger', path: 'ledgerType' },
+    { header: 'Reference', path: 'paymentReference', type: 'code' },
+    { header: 'Route', path: 'route.routeCode', type: 'code' },
+    { header: 'Collected By', path: 'createdBy' },
+    { header: 'Status', path: 'status' },
+    { header: 'Counts Toward Totals', path: 'countsTowardTotals' }
+  ],
   [REPORTS.DEMAND_COLLECTIONS]: [
     { header: 'Route Code', path: 'route.routeCode', type: 'code' },
     { header: 'Route Name', path: 'route.name' },
@@ -189,6 +246,7 @@ module.exports = {
   REPORT_TITLES,
   EXPORT_MAX_ROWS,
   EXPORT_SCOPE,
+  BOUNCE_SCOPE,
   DEFAULT_LIMIT,
   MAX_LIMIT,
   CSV_COLUMNS

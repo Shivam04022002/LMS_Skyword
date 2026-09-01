@@ -93,6 +93,17 @@ const collectionReport = reportHandler({
   rowsOf: (data) => data.collections
 });
 
+/*
+ * Same generic handler as every other report: one code path serves JSON, CSV
+ * and Excel, the export runs the identical service call with a raised limit, and
+ * the workbook Summary is the report's own summary block.
+ */
+const bounceCollectionReport = reportHandler({
+  key: REPORTS.BOUNCE_COLLECTIONS,
+  run: reportService.bounceCollectionReport,
+  rowsOf: (data) => data.collections
+});
+
 const emiReport = reportHandler({
   key: REPORTS.EMIS,
   run: reportService.emiReport,
@@ -105,4 +116,4 @@ const demandCollectionReport = reportHandler({
   rowsOf: (data) => data.rows
 });
 
-module.exports = { loanReport, collectionReport, emiReport, demandCollectionReport };
+module.exports = { loanReport, collectionReport, bounceCollectionReport, emiReport, demandCollectionReport };

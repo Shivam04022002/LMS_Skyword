@@ -17,6 +17,15 @@ export const getEmiReport = (params) => api.get('/admin/reports/emis', { params:
 export const getDemandCollectionReport = (params) => api.get('/admin/reports/demand-collections', { params: toQuery(params) });
 
 /**
+ * Bounce Collection report — collections that actually carried bounce money.
+ *
+ * The backend applies `bounce_amount > 0` in SQL, so this never pulls every
+ * collection down to filter in the browser.
+ */
+export const getBounceCollectionReport = (params) =>
+  api.get('/admin/reports/bounce-collections', { params: toQuery(params) });
+
+/**
  * Downloads a report as CSV.
  *
  * Goes through the shared Axios client so the auth header, the 401 handler and

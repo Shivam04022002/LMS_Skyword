@@ -11,7 +11,7 @@ const { today } = require('../utils/dates');
 const { EMI_STATUS } = require('../config/emis');
 const { COLLECTION_STATUS } = require('../config/collections');
 const { ASSIGNMENT_STATUS } = require('../config/routes');
-const { DEFAULT_LIMIT, MAX_LIMIT, EXPORT_MAX_ROWS, EXPORT_SCOPE } = require('../config/reports');
+const { DEFAULT_LIMIT, MAX_LIMIT, EXPORT_MAX_ROWS, EXPORT_SCOPE, BOUNCE_SCOPE } = require('../config/reports');
 
 /**
  * Read-only reporting.
@@ -274,6 +274,19 @@ async function collectionReport(filters = {}, actor) {
     where.collectionNumber = { [Op.like]: `%${String(search).trim()}%` };
   }
 
+  /*
+   * Bounce Collection view: only collections that actually carry bounce money.
+   *
+   * Applied here, in SQL, so paging and the summary both see the restricted
+   * set — the alternative, fetching every collection and dropping the zero-
+   * bounce ones in the browser, would page wrongly and scale badly. Everything
+   * else about the query, the row shape and the totals is untouched, which is
+   * why this report needs no bounce calculation of its own.
+   */
+  if (filters[BOUNCE_SCOPE]) {
+    where.bounceAmount = { [Op.gt]: 0 };
+  }
+
   if (scope.routeIds !== null) {
     const loanIds = await loanIdsForRoutes(scope.routeIds);
     // A collector also keeps sight of collections they posted themselves, even
@@ -350,15 +363,40 @@ async function collectionReport(filters = {}, actor) {
     };
   });
 
-  const summary = await collectionReportSummary(where);
+  const summary = await collectionReportSummary(where, { includeBounceDetail: Boolean(filters[BOUNCE_SCOPE]) });
 
   return { collections, summary, pagination: pagination(currentPage, pageSize, count) };
 }
 
+/**
+ * GET /api/admin/reports/bounce-collections
+ *
+ * The Bounce Collection report: collections that actually carried bounce money.
+ *
+ * A thin view over `collectionReport`, deliberately — not a second query, not a
+ * second set of totals, and not a second definition of what bounce is. It adds
+ * exactly one thing: `bounce_amount > 0` in the WHERE clause. Every row field
+ * and every summary figure is the one the collection report already computes
+ * from `collections.bounce_amount`, so the two pages can never disagree, and
+ * `emi_schedules.bounce_charge` is no more involved here than it is there.
+ *
+ * Scope, status, ledger, date and search filters all behave identically,
+ * including a collector being confined to their own routes.
+ */
+async function bounceCollectionReport(filters = {}, actor) {
+  return collectionReport({ ...filters, [BOUNCE_SCOPE]: true }, actor);
+}
+
 const EMPTY_BREAKDOWN = Object.freeze({ collectedPrincipal: '0.00', collectedInterest: '0.00', emiCollected: '0.00' });
 
-/** Totals split by status: only POSTED money counts. */
-async function collectionReportSummary(where) {
+/**
+ * Totals split by status: only POSTED money counts.
+ *
+ * `includeBounceDetail` adds the reversed bounce figure the Bounce Collection
+ * page shows as "excluded from totals". It is opt-in so the collection report
+ * and the dashboard, which do not display it, pay nothing for it.
+ */
+async function collectionReportSummary(where, { includeBounceDetail = false } = {}) {
   const rows = await Collection.findAll({
     attributes: ['status', [fn('COUNT', col('id')), 'count'], [fn('COALESCE', fn('SUM', col('amount')), 0), 'amount']],
     where,
@@ -390,6 +428,16 @@ async function collectionReportSummary(where) {
    */
   const { bounceCollection, bounceCollectionCount } = await collectionAllocationService.bounceCollected(postedOnly);
 
+  /*
+   * Bounce on the REVERSED rows of the same filtered set. Reported so the page
+   * can show what is deliberately NOT in the collected total; it is never added
+   * to one.
+   */
+  const reversedBounce = includeBounceDetail
+    ? (await collectionAllocationService.bounceCollected({ [Op.and]: [where, { status: COLLECTION_STATUS.REVERSED }] }))
+        .bounceCollection
+    : undefined;
+
   return {
     totalCount: posted.count + reversed.count,
     postedCount: posted.count,
@@ -414,7 +462,8 @@ async function collectionReportSummary(where) {
     collectedInterest: totals.collectedInterest,
     collectedBounce: bounceCollection,
     // How many of those collections carried any bounce at all.
-    bounceCollectionCount
+    bounceCollectionCount,
+    ...(includeBounceDetail ? { reversedBounce } : {})
   };
 }
 
@@ -731,6 +780,7 @@ async function demandCollectionReport(filters = {}, actor) {
 module.exports = {
   loanReport,
   collectionReport,
+  bounceCollectionReport,
   emiReport,
   demandCollectionReport,
   resolveScope,
