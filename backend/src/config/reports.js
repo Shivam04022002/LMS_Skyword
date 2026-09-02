@@ -166,13 +166,23 @@ const CSV_COLUMNS = Object.freeze({
     { header: 'Start Date', path: 'startDate', type: 'date' },
     { header: 'Created Date', path: 'createdAt', type: 'date' }
   ],
+  /*
+   * The downloaded Collection Report is deliberately narrower than the screen.
+   *
+   * Collection Number, CIF, Payment Reference, Status and Counts Toward Totals
+   * are NOT exported: they are identifiers and row-level state that the
+   * on-screen report still shows in full, and that the API still returns in
+   * full. Only this file decides what leaves the system as a file, so removing
+   * them here removes them from the workbook itself rather than hiding them.
+   *
+   * Nothing else moves: the surviving columns keep their existing order,
+   * paths, types and formatting, and every money figure is the same value the
+   * report computed.
+   */
   [REPORTS.COLLECTIONS]: [
-    { header: 'Collection Number', path: 'collectionNumber', type: 'code' },
     { header: 'Collection Date', path: 'collectionDate', type: 'date' },
-    { header: 'Status', path: 'status' },
     { header: 'Loan Number', path: 'loan.loanNumber', type: 'code' },
     { header: 'Applicant', path: 'customer.fullName' },
-    { header: 'CIF', path: 'customer.cifId', type: 'code' },
     { header: 'Amount', path: 'amount', type: 'money' },
     { header: 'Collected Principal', path: 'collectedPrincipal', type: 'money' },
     { header: 'Collected Interest', path: 'collectedInterest', type: 'money' },
@@ -181,10 +191,8 @@ const CSV_COLUMNS = Object.freeze({
     // EMI Collected + Collected Bounce, exactly.
     { header: 'EMI Collected', path: 'emiCollected', type: 'money' },
     { header: 'Ledger', path: 'ledgerType' },
-    { header: 'Payment Reference', path: 'paymentReference', type: 'code' },
     { header: 'Route Code', path: 'route.routeCode', type: 'code' },
-    { header: 'Collected By', path: 'createdBy' },
-    { header: 'Counts Toward Totals', path: 'countsTowardTotals' }
+    { header: 'Collected By', path: 'createdBy' }
   ],
   [REPORTS.EMIS]: [
     { header: 'Loan Number', path: 'loan.loanNumber', type: 'code' },

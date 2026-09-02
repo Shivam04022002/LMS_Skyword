@@ -8414,7 +8414,13 @@ async function runRules(rules, source) {
             loan: { loanNumber: 'LN26-000001' },
             customer: { fullName: 'Asha Verma', cifId: 'C000007' },
             amount: '2500.00',
+            collectedPrincipal: '2100.00',
+            collectedInterest: '400.00',
+            collectedBounce: '0.00',
+            emiCollected: '2500.00',
             ledgerType: 'CASH',
+            // Still present on the ROW — the API and the screen keep these —
+            // but deliberately not among the exported columns.
             paymentReference: '000451',
             route: { routeCode: 'RT26-000001' },
             createdBy: 'Ravi',
@@ -8436,9 +8442,11 @@ async function runRules(rules, source) {
           collectedBounce: '0.00',
           bounceCollectionCount: 0
         },
-        moneyColumn: 7,
-        dateColumn: 2,
-        codeColumn: 1
+        // Amount / Collection Date / Loan Number, after the five identifier and
+        // status columns were dropped from the download.
+        moneyColumn: 4,
+        dateColumn: 1,
+        codeColumn: 2
       },
       /*
        * The Bounce Collection report: the same collection rows restricted to
@@ -10341,6 +10349,267 @@ async function runRules(rules, source) {
         );
       })(),
       'allocations are still validated against amount − bounce'
+    );
+  }
+
+  // ---------- Collection Report download: narrowed column set ----------
+  {
+    const ExcelJS2 = require('exceljs');
+    const excelService = require('../src/services/reportExcelService');
+    const { toCsv } = require('../src/utils/csv');
+    const { CSV_COLUMNS: X_COLUMNS, REPORTS: X_REPORTS, REPORT_TITLES: X_TITLES } = require('../src/config/reports');
+
+    /*
+     * Five columns were removed from the Collection Report DOWNLOAD only:
+     * Collection Number, CIF, Payment Reference, Status and Counts Toward
+     * Totals. They remain on screen, in the API and in the database — this
+     * block pins that the workbook itself no longer carries them, rather than
+     * merely hiding them somewhere.
+     */
+    const REMOVED = ['Collection Number', 'CIF', 'Payment Reference', 'Status', 'Counts Toward Totals'];
+    const EXPECTED_ORDER = [
+      'Collection Date',
+      'Loan Number',
+      'Applicant',
+      'Amount',
+      'Collected Principal',
+      'Collected Interest',
+      'Collected Bounce',
+      'EMI Collected',
+      'Ledger',
+      'Route Code',
+      'Collected By'
+    ];
+
+    const declared = X_COLUMNS[X_REPORTS.COLLECTIONS].map((column) => column.header);
+
+    record(
+      'Collection export',
+      'the five columns are gone from the Collection Report column definition',
+      REMOVED.every((header) => !declared.includes(header)),
+      `removed: ${REMOVED.join(', ')}`
+    );
+
+    record(
+      'Collection export',
+      'the surviving columns are exactly the expected set, in the expected order',
+      declared.join('|') === EXPECTED_ORDER.join('|'),
+      declared.join(' | ')
+    );
+
+    /*
+     * A row carrying EVERY field, including the five that were dropped. If any
+     * of them could still reach a file, this fixture would expose it.
+     */
+    const row = {
+      collectionNumber: 'COL26-000071',
+      collectionDate: '2026-08-19',
+      status: 'REVERSED',
+      loan: { loanNumber: 'LN26-000002' },
+      customer: { fullName: 'Asha Verma', cifId: 'C000007' },
+      amount: '2500.00',
+      collectedPrincipal: '1600.00',
+      collectedInterest: '400.00',
+      collectedBounce: '500.00',
+      emiCollected: '2000.00',
+      ledgerType: 'CASH',
+      paymentReference: 'UTR-SECRET-000451',
+      route: { routeCode: 'RT26-000001' },
+      createdBy: 'Ravi',
+      countsTowardTotals: false
+    };
+
+    const summary = {
+      totalCount: 1,
+      postedCount: 0,
+      postedAmount: '0.00',
+      reversedCount: 1,
+      reversedAmount: '2500.00',
+      netCollected: '0.00',
+      emiCollected: '0.00',
+      collectedPrincipal: '0.00',
+      collectedInterest: '0.00',
+      collectedBounce: '0.00',
+      bounceCollectionCount: 0
+    };
+
+    const buffer = await excelService.buildReportWorkbook({
+      reportKey: X_REPORTS.COLLECTIONS,
+      rows: [row],
+      summary,
+      filters: { status: 'REVERSED', format: 'xlsx' }
+    });
+    const book = new ExcelJS2.Workbook();
+    await book.xlsx.load(buffer);
+    const sheet = book.getWorksheet(X_TITLES[X_REPORTS.COLLECTIONS]);
+    const headerRow = sheet.getRow(1).values.slice(1).map(String);
+    const dataRow = sheet.getRow(2);
+
+    record(
+      'Collection export',
+      'the GENERATED workbook header row carries none of the five removed columns',
+      REMOVED.every((header) => !headerRow.includes(header)),
+      headerRow.join(' | ')
+    );
+
+    record(
+      'Collection export',
+      'the generated workbook header row is exactly the expected order',
+      headerRow.join('|') === EXPECTED_ORDER.join('|'),
+      `${headerRow.length} columns`
+    );
+
+    record(
+      'Collection export',
+      'no removed VALUE leaks into any cell of the workbook, under any header',
+      (() => {
+        const cells = [];
+        sheet.eachRow((r) => r.eachCell((cell) => cells.push(String(cell.value ?? ''))));
+        // The collection number, CIFID, reference and status of the row above.
+        return ['COL26-000071', 'C000007', 'UTR-SECRET-000451', 'REVERSED', 'false'].every(
+          (value) => !cells.includes(value)
+        );
+      })(),
+      'identifiers, reference and status absent from every cell'
+    );
+
+    record(
+      'Collection export',
+      'the remaining columns still line up with their own data',
+      (() => {
+        const at = (header) => dataRow.getCell(EXPECTED_ORDER.indexOf(header) + 1).value;
+        return (
+          String(at('Loan Number')) === 'LN26-000002' &&
+          String(at('Applicant')) === 'Asha Verma' &&
+          String(at('Ledger')) === 'CASH' &&
+          String(at('Route Code')) === 'RT26-000001' &&
+          String(at('Collected By')) === 'Ravi'
+        );
+      })(),
+      'no off-by-one after the removals'
+    );
+
+    record(
+      'Collection export',
+      'financial values are unchanged and still numeric with the INR format',
+      (() => {
+        const cell = (header) => dataRow.getCell(EXPECTED_ORDER.indexOf(header) + 1);
+        const money = ['Amount', 'Collected Principal', 'Collected Interest', 'Collected Bounce', 'EMI Collected'];
+        return (
+          money.every((h) => typeof cell(h).value === 'number' && cell(h).numFmt === '₹#,##0.00') &&
+          cell('Amount').value === 2500 &&
+          cell('Collected Principal').value === 1600 &&
+          cell('Collected Interest').value === 400 &&
+          cell('Collected Bounce').value === 500 &&
+          cell('EMI Collected').value === 2000 &&
+          // The reconciliation still reads correctly off the exported figures.
+          cell('EMI Collected').value + cell('Collected Bounce').value === cell('Amount').value &&
+          cell('Collected Principal').value + cell('Collected Interest').value === cell('EMI Collected').value
+        );
+      })(),
+      '2000 + 500 = 2500, and 1600 + 400 = 2000'
+    );
+
+    record(
+      'Collection export',
+      'the date column is still a real date cell',
+      (() => {
+        const cell = dataRow.getCell(EXPECTED_ORDER.indexOf('Collection Date') + 1);
+        return cell.value instanceof Date && cell.numFmt === 'yyyy-mm-dd';
+      })(),
+      'Collection Date remains a date, not text'
+    );
+
+    record(
+      'Collection export',
+      'the Summary sheet is untouched — every total the report computes is still exported',
+      (() => {
+        const summarySheet = book.getWorksheet('Summary');
+        const labels = [];
+        summarySheet.eachRow((r) => labels.push(String(r.getCell(1).value ?? '')));
+        return ['Net Collected', 'Collected Principal', 'Collected Interest', 'Collected Bounce', 'EMI Collected'].every(
+          (label) => labels.includes(label)
+        );
+      })(),
+      'summary totals unaffected by the column removal'
+    );
+
+    record(
+      'Collection export',
+      'the CSV variant of the SAME report agrees with the workbook — one column definition, not two',
+      (() => {
+        const csv = toCsv([row], X_COLUMNS[X_REPORTS.COLLECTIONS]);
+        const header = csv.split(/\r?\n/)[0];
+        return (
+          REMOVED.every((h) => !header.includes(h)) &&
+          !csv.includes('COL26-000071') &&
+          !csv.includes('UTR-SECRET-000451') &&
+          header.includes('Collection Date') &&
+          header.includes('EMI Collected')
+        );
+      })(),
+      'CSV and XLSX cannot disagree about what the report contains'
+    );
+
+    /* --------------------- everything else is untouched --------------------- */
+
+    record(
+      'Collection export',
+      'the BOUNCE Collection export still carries all fourteen of its own columns',
+      X_COLUMNS[X_REPORTS.BOUNCE_COLLECTIONS].map((c) => c.header).join(' | ') ===
+        'Collection Number | Collection Date | Loan Number | Customer | CIFID | Total Received | EMI Collected | Bounce Collected | Ledger | Reference | Route | Collected By | Status | Counts Toward Totals',
+      'separate column array, deliberately unchanged'
+    );
+
+    record(
+      'Collection export',
+      'the loan, EMI and demand exports are untouched',
+      X_COLUMNS[X_REPORTS.LOANS].length === 20 &&
+        X_COLUMNS[X_REPORTS.EMIS].some((c) => c.header === 'Bounce Charge') &&
+        X_COLUMNS[X_REPORTS.DEMAND_COLLECTIONS].length === 9,
+      `loans=${X_COLUMNS[X_REPORTS.LOANS].length} emis=${X_COLUMNS[X_REPORTS.EMIS].length} demand=${X_COLUMNS[X_REPORTS.DEMAND_COLLECTIONS].length}`
+    );
+
+    record(
+      'Collection export',
+      'the on-screen Collection report still shows the columns the download drops',
+      (() => {
+        const page = stripComments(
+          fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'pages', 'reports', 'CollectionReportPage.jsx'), 'utf8')
+        );
+        return (
+          /<th scope="col">Collection<\/th>/.test(page) &&
+          /<th scope="col">Reference<\/th>/.test(page) &&
+          /<th scope="col">Status<\/th>/.test(page) &&
+          /c\.customer\?\.cifId/.test(page) &&
+          /c\.collectionNumber/.test(page) &&
+          /countsTowardTotals/.test(page)
+        );
+      })(),
+      'screen unchanged: collection number, CIFID, reference and status all still rendered'
+    );
+
+    record(
+      'Collection export',
+      'the API still RETURNS every removed field — only the download was narrowed',
+      (() => {
+        const service = stripComments(
+          fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'reportService.js'), 'utf8')
+        );
+        // Bounded by the collection report's OWN summary call — `const summary =
+        // await` first matches the loan report, which sits earlier in the file
+        // and would slice to nothing.
+        const start = service.indexOf('const collections = rows.map');
+        const rowShape = service.slice(start, service.indexOf('collectionReportSummary(where', start));
+        return (
+          /collectionNumber: collection\.collectionNumber/.test(rowShape) &&
+          /status: collection\.status/.test(rowShape) &&
+          /paymentReference: collection\.paymentReference/.test(rowShape) &&
+          /cifId: collection\.Customer\.cifId/.test(rowShape) &&
+          /countsTowardTotals: posted/.test(rowShape)
+        );
+      })(),
+      'reportService row shape unchanged'
     );
   }
 
