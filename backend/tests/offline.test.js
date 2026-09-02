@@ -11107,6 +11107,165 @@ async function runRules(rules, source) {
     );
   }
 
+  // ---------- Currency formatting: Indian digit grouping ----------
+  {
+    /*
+     * Money was rendered with international grouping — ₹2,207,381.49 — on every
+     * screen. Indian grouping puts the last three digits together and then
+     * groups in twos: ₹22,07,381.49.
+     *
+     * The real shipped module is imported and executed here rather than having
+     * its behaviour restated, so these assertions cannot pass against a copy
+     * that has drifted from what the browser loads.
+     */
+    const moduleUrl = require('url').pathToFileURL(
+      path.resolve(__dirname, '..', '..', 'frontend', 'src', 'utils', 'loanConstants.js')
+    ).href;
+    const { formatCurrency: inr } = await import(moduleUrl);
+
+    const CASES = [
+      // The figures from the reported screen.
+      ['2207381.49', '₹22,07,381.49'],
+      ['18500', '₹18,500.00'],
+      ['0.00', '₹0.00'],
+      // The required ladder.
+      ['100000', '₹1,00,000.00'],
+      ['1000000', '₹10,00,000.00'],
+      ['10000000', '₹1,00,00,000.00'],
+      // Boundaries either side of the first separator.
+      ['999', '₹999.00'],
+      ['1000', '₹1,000.00'],
+      ['99999', '₹99,999.00'],
+      ['100000.5', '₹1,00,000.50'],
+      // Real production figures.
+      ['49996387.25', '₹4,99,96,387.25'],
+      ['42810000.00', '₹4,28,10,000.00'],
+      // Very large, to prove the twos continue indefinitely.
+      ['123456789012', '₹1,23,45,67,89,012.00']
+    ];
+
+    record(
+      'Indian currency format',
+      'every required amount groups the Indian way',
+      CASES.every(([input, expected]) => inr(input) === expected),
+      CASES.map(([i, e]) => `${i}->${inr(i)}${inr(i) === e ? '' : ` (want ${e})`}`).join(', ')
+    );
+
+    record(
+      'Indian currency format',
+      'the international grouping is gone: 2207381.49 is never rendered as ₹2,207,381.49',
+      inr('2207381.49') === '₹22,07,381.49' && inr('2207381.49') !== '₹2,207,381.49',
+      inr('2207381.49')
+    );
+
+    record(
+      'Indian currency format',
+      'NEGATIVE amounts keep their sign and group correctly — no stray separator after the minus',
+      inr('-2207381.49') === '₹-22,07,381.49' &&
+        inr('-500') === '₹-500.00' &&
+        inr('-1000') === '₹-1,000.00' &&
+        // The naive "split off the last three" implementation produces ₹-,500.00 here.
+        !inr('-500').includes('-,'),
+      `${inr('-2207381.49')} / ${inr('-500')} / ${inr('-1000')}`
+    );
+
+    record(
+      'Indian currency format',
+      'blank input still renders the em dash, and the fraction is still padded to two places',
+      inr(null) === '—' &&
+        inr(undefined) === '—' &&
+        inr('') === '—' &&
+        inr('5') === '₹5.00' &&
+        inr('5.4') === '₹5.40' &&
+        inr('5.456') === '₹5.45',
+      'unchanged from before'
+    );
+
+    record(
+      'Indian currency format',
+      'the formatter is still string-based — no Number() conversion reintroduces floating-point drift',
+      (() => {
+        const source = stripComments(
+          fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'utils', 'loanConstants.js'), 'utf8')
+        );
+        const fn = source.slice(source.indexOf('export function formatCurrency'), source.indexOf('export const titleCase'));
+        return (
+          !/Number\(|parseFloat|parseInt|toLocaleString|Intl\./.test(fn) &&
+          /String\(value\)\.split\('\.'\)/.test(fn) &&
+          // A 15-digit amount survives intact, which a float round-trip would not guarantee.
+          inr('999999999999.99') === '₹9,99,99,99,99,999.99'
+        );
+      })(),
+      'decimal string in, decimal string out'
+    );
+
+    record(
+      'Indian currency format',
+      'ONE shared formatter — the fix reaches every screen, and no page formats money itself',
+      (() => {
+        const frontendSrc = path.resolve(__dirname, '..', '..', 'frontend', 'src');
+        const walk = (dir) =>
+          fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+            const full = path.join(dir, entry.name);
+            return entry.isDirectory() ? walk(full) : full;
+          });
+        const files = walk(frontendSrc).filter((f) => /\.(js|jsx)$/.test(f));
+        const definitions = files.filter((f) => /export (function|const) formatCurrency/.test(fs.readFileSync(f, 'utf8')));
+        // No component reimplements the three-digit grouping locally.
+        const localGrouping = files.filter(
+          (f) =>
+            !f.endsWith(path.join('utils', 'loanConstants.js')) &&
+            /\\B\(\?=\(\\d\{3\}\)\+/.test(fs.readFileSync(f, 'utf8'))
+        );
+        return definitions.length === 1 && localGrouping.length === 0;
+      })(),
+      'one definition in utils/loanConstants.js, no local re-implementations'
+    );
+
+    record(
+      'Indian currency format',
+      'the Demand vs Collection screen renders every money figure through that formatter',
+      (() => {
+        const page = stripComments(
+          fs.readFileSync(
+            path.resolve(__dirname, '..', '..', 'frontend', 'src', 'pages', 'reports', 'DemandCollectionReportPage.jsx'),
+            'utf8'
+          )
+        );
+        return [
+          'summary.grossDemand',
+          'summary.collectedAgainstDemand',
+          'summary.netDemand',
+          'summary.collectedInPeriod',
+          'row.grossDemand',
+          'row.collectedAgainstDemand',
+          'row.netDemand',
+          'row.collectedInPeriod'
+        ].every((field) => new RegExp(`formatCurrency\\(${field.replace('.', '\\.')}\\)`).test(page));
+      })(),
+      'gross demand, already collected, net demand and collected in period — cards and table'
+    );
+
+    record(
+      'Indian currency format',
+      'no COUNT or percentage is passed through the money formatter',
+      (() => {
+        const frontendSrc = path.resolve(__dirname, '..', '..', 'frontend', 'src');
+        const walk = (dir) =>
+          fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+            const full = path.join(dir, entry.name);
+            return entry.isDirectory() ? walk(full) : full;
+          });
+        const args = walk(frontendSrc)
+          .filter((f) => /\.(js|jsx)$/.test(f))
+          .flatMap((f) => [...fs.readFileSync(f, 'utf8').matchAll(/formatCurrency\(([^)]*)\)/g)].map((m) => m[1]));
+        const suspicious = args.filter((a) => /count|percent|\bdpd\b|tenure|\broi\b|emiCount|Days\b/i.test(a));
+        return args.length > 0 && suspicious.length === 0;
+      })(),
+      'every call site passes a currency value'
+    );
+  }
+
   // ---------- Frontend action wiring ----------
   {
     /*

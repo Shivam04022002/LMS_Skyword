@@ -138,12 +138,30 @@ export const ALLOWED_TRANSITIONS = Object.freeze({
   CANCELLED: []
 });
 
-/** Formats a DECIMAL string from the API without floating-point drift. */
+/**
+ * Formats a DECIMAL string from the API without floating-point drift.
+ *
+ * Grouping is the INDIAN system: the last three digits, then twos —
+ * 22,07,381.49, not the international 2,207,381.49.
+ *
+ * Deliberately still string-based rather than Intl.NumberFormat('en-IN'):
+ * that would require Number(value), reintroducing exactly the floating-point
+ * conversion this function exists to avoid. The value arrives as a decimal
+ * string from the API and leaves as one, with only separators inserted.
+ */
 export function formatCurrency(value) {
   if (value === null || value === undefined || value === '') return '—';
   const [whole, fraction = '00'] = String(value).split('.');
-  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  return `₹${grouped}.${fraction.padEnd(2, '0').slice(0, 2)}`;
+
+  // The sign is held aside so it cannot be mistaken for a digit group.
+  const negative = whole.startsWith('-');
+  const digits = negative ? whole.slice(1) : whole;
+
+  const lastThree = digits.slice(-3);
+  const rest = digits.slice(0, -3);
+  const grouped = rest ? `${rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',')},${lastThree}` : lastThree;
+
+  return `₹${negative ? '-' : ''}${grouped}.${fraction.padEnd(2, '0').slice(0, 2)}`;
 }
 
 export const titleCase = (value) =>
