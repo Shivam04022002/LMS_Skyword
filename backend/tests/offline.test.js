@@ -10132,6 +10132,218 @@ async function runRules(rules, source) {
     );
   }
 
+  // ---------- Collection form: amount / allocation / bounce reconciliation ----------
+  {
+    /*
+     * The defect this guards against: the form enforced
+     *
+     *     amount = SUM(allocated) + bounce
+     *
+     * but never explained it. Entering ₹17,500 amount, ₹17,500 allocation and
+     * ₹1,000 bounce produced Unallocated −₹1,000, a disabled Post button, and
+     * no message — because the only guidance was assigned inside handleSubmit,
+     * which cannot run while the button is disabled. The required amount is
+     * ₹18,500: bounce is money received ON TOP of the instalment, not carved
+     * out of it.
+     */
+    const { emiPortionPaise } = require('../src/config/collections');
+
+    /** Runs one amount/allocation/bounce combination through the REAL guards. */
+    const evaluate = ({ amount, allocation, bounce }) => {
+      try {
+        const emiPaise = collectionService.assertBounceAmount(amount, bounce);
+        if (allocation === null) {
+          return { ok: emiPaise === 0n, emiPortion: fromPaise(emiPaise), reason: 'no allocation required' };
+        }
+        const total = allocationService.assertAllocationShape([{ emiId: 1, amount: allocation }]);
+        allocationService.assertAllocationTotal(total, fromPaise(emiPaise));
+        return { ok: true, emiPortion: fromPaise(emiPaise) };
+      } catch (error) {
+        return { ok: false, status: error.statusCode, reason: error.message };
+      }
+    };
+
+    // A. EMI only.
+    {
+      const r = evaluate({ amount: '17500.00', allocation: '17500.00', bounce: '0.00' });
+      record(
+        'Collection reconciliation',
+        'A. amount 17500, allocation 17500, bounce 0 is VALID',
+        r.ok && r.emiPortion === '17500.00',
+        `EMI portion ${r.emiPortion}`
+      );
+    }
+
+    // B. EMI + bounce — the combination the operator actually wanted.
+    {
+      const r = evaluate({ amount: '18500.00', allocation: '17500.00', bounce: '1000.00' });
+      record(
+        'Collection reconciliation',
+        'B. amount 18500, allocation 17500, bounce 1000 is VALID (17500 + 1000 = 18500)',
+        r.ok &&
+          r.emiPortion === '17500.00' &&
+          emiPortionPaise('18500.00', '1000.00') === toPaise('17500.00'),
+        `EMI portion ${r.emiPortion}`
+      );
+    }
+
+    // C. The reported bug: the backend already refuses it, on its own.
+    {
+      const r = evaluate({ amount: '17500.00', allocation: '17500.00', bounce: '1000.00' });
+      record(
+        'Collection reconciliation',
+        'C. amount 17500, allocation 17500, bounce 1000 is REJECTED by the backend, not merely by the UI',
+        !r.ok && r.status === 400 && /more than the collection amount 16500\.00/.test(r.reason),
+        r.reason
+      );
+    }
+
+    // D. Bounce-only, where the existing rules already allow no allocation.
+    {
+      const r = evaluate({ amount: '1000.00', allocation: null, bounce: '1000.00' });
+      record(
+        'Collection reconciliation',
+        'D. amount 1000, no allocation, bounce 1000 is VALID (the whole payment is bounce)',
+        r.ok && r.emiPortion === '0.00',
+        `EMI portion ${r.emiPortion} — ${r.reason}`
+      );
+    }
+
+    // E. Partial instalment plus bounce.
+    {
+      const r = evaluate({ amount: '9000.00', allocation: '8000.00', bounce: '1000.00' });
+      record(
+        'Collection reconciliation',
+        'E. amount 9000, allocation 8000, bounce 1000 is VALID (8000 + 1000 = 9000)',
+        r.ok && r.emiPortion === '8000.00',
+        `EMI portion ${r.emiPortion}`
+      );
+    }
+
+    /* ------------------------------ the form fix ----------------------------- */
+
+    const modal = stripComments(
+      fs.readFileSync(
+        path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'collections', 'CollectionFormModal.jsx'),
+        'utf8'
+      )
+    );
+
+    record(
+      'Collection reconciliation',
+      'the form computes the REQUIRED amount as allocated + bounce, the invariant read forwards',
+      /const requiredAmountMinor = allocatedMinor \+ bounceMinor;/.test(modal),
+      'requiredAmountMinor = allocatedMinor + bounceMinor'
+    );
+
+    record(
+      'Collection reconciliation',
+      'the guidance is LIVE, not assigned inside handleSubmit where a disabled button can never reach it',
+      (() => {
+        const submit = modal.slice(modal.indexOf('const handleSubmit'), modal.indexOf('const payload = {'));
+        // Declared at render scope...
+        return (
+          /const reconciliationError =\s*\n?\s*amountMinor > 0 && !amountMatchesRequired/.test(modal) &&
+          // ...and handleSubmit only reuses it, never defines the text itself.
+          /errors\.allocations = reconciliationError;/.test(submit) &&
+          !/errors\.allocations = '/.test(submit)
+        );
+      })(),
+      'computed during render, so it shows while Post is disabled'
+    );
+
+    record(
+      'Collection reconciliation',
+      'the message names the rule and the exact amount required',
+      /Collection amount must equal EMI allocated \+ Bounce collected\. Required amount: \$\{formatCurrency\(/.test(modal),
+      '"…Required amount: ₹18,500."'
+    );
+
+    record(
+      'Collection reconciliation',
+      'a non-zero Unallocated is never displayed bare — the error always accompanies it',
+      (() => {
+        // The figure is flagged, and the message block is rendered from the same
+        // condition that makes it non-zero.
+        return (
+          /amountMatchesRequired \? '' : ' text-danger'/.test(modal) &&
+          /\{reconciliationError \? \(/.test(modal) &&
+          /const amountMatchesRequired = unallocatedMinor === 0;/.test(modal)
+        );
+      })(),
+      'negative Unallocated is red and carries the explanation'
+    );
+
+    record(
+      'Collection reconciliation',
+      'the required amount can be applied in one click, and is never written silently',
+      /const applyRequiredAmount = \(\) => \{/.test(modal) &&
+        /setForm\(\(current\) => \(\{ \.\.\.current, amount: fromMinorUnits\(requiredAmountMinor\) \}\)\)/.test(modal) &&
+        /onClick=\{applyRequiredAmount\}/.test(modal) &&
+        // Only ever from that explicit handler — no effect rewrites the field.
+        (modal.match(/amount: fromMinorUnits\(requiredAmountMinor\)/g) ?? []).length === 1,
+      'an explicit "Use ₹…" button, not an effect'
+    );
+
+    record(
+      'Collection reconciliation',
+      'the helper line explains that bounce is part of the amount and is not allocated',
+      /Bounce collected is included in the total amount received\. It is not allocated to an EMI\./.test(modal) &&
+        /\{bounceMinor > 0 \? \(/.test(modal),
+      'shown once a bounce amount is entered'
+    );
+
+    record(
+      'Collection reconciliation',
+      'Post stays disabled until the reconciliation holds',
+      /unallocatedMinor === 0 &&/.test(modal) &&
+        /!bounceOverAmount &&/.test(modal) &&
+        /disabled=\{!canSubmit\}/.test(modal),
+      'canSubmit still requires unallocatedMinor === 0'
+    );
+
+    record(
+      'Collection reconciliation',
+      'the panel reports all four figures, so the arithmetic is visible',
+      ['Total collection', 'EMI allocated', 'Bounce collection', 'Unallocated'].every((label) =>
+        new RegExp(`>${label}</div>`).test(modal)
+      ),
+      'TOTAL COLLECTION / EMI ALLOCATED / BOUNCE COLLECTION / UNALLOCATED'
+    );
+
+    record(
+      'Collection reconciliation',
+      'the posted payload is unchanged: amount, bounceAmount and allocations stay three separate fields',
+      (() => {
+        const payload = modal.slice(modal.indexOf('const payload = {'), modal.indexOf('const response = await createCollection'));
+        return (
+          /amount: form\.amount,/.test(payload) &&
+          /bounceAmount: fromMinorUnits\(bounceMinor\)/.test(payload) &&
+          /allocations: Object\.entries\(allocations\)/.test(payload) &&
+          // For the worked example that is amount 18500, bounceAmount 1000,
+          // allocations totalling 17500 — bounce never inside an allocation.
+          !/allocations:[\s\S]{0,400}bounce/i.test(payload)
+        );
+      })(),
+      'amount 18500 / bounceAmount 1000 / allocations 17500'
+    );
+
+    record(
+      'Collection reconciliation',
+      'the backend invariant itself was NOT relaxed to make the form pass',
+      (() => {
+        const service = stripComments(
+          fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionService.js'), 'utf8')
+        );
+        return (
+          /const emiPaise = assertBounceAmount\(amount, bounceAmount\);/.test(service) &&
+          /collectionAmount: fromPaise\(emiPaise\)/.test(service)
+        );
+      })(),
+      'allocations are still validated against amount − bounce'
+    );
+  }
+
   // ---------- Frontend action wiring ----------
   {
     /*

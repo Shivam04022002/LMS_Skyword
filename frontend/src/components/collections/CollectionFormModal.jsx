@@ -157,6 +157,39 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
   const unallocatedMinor = emiTargetMinor - allocatedMinor;
   const bounceOverAmount = bounceMinor > amountMinor;
 
+  /*
+   * The amount the customer must actually have handed over, given what is being
+   * allocated and what is being collected as bounce. This is the backend's
+   * invariant read forwards:
+   *
+   *     amount = SUM(allocated) + bounceAmount
+   *
+   * Bounce is money received on top of the instalment, so entering ₹1,000 of
+   * bounce against a ₹17,500 allocation means ₹18,500 was received — not
+   * ₹17,500 with ₹1,000 carved out of it. Stating the required figure is what
+   * the form was missing: the reconciliation was enforced, but never explained.
+   */
+  const requiredAmountMinor = allocatedMinor + bounceMinor;
+  const amountMatchesRequired = unallocatedMinor === 0;
+
+  /*
+   * Live, not submit-gated. The previous guidance was only ever assigned inside
+   * handleSubmit, which cannot run while the Post button is disabled — so the
+   * operator saw a bare negative "Unallocated" and no way to act on it.
+   */
+  const reconciliationError =
+    amountMinor > 0 && !amountMatchesRequired
+      ? `Collection amount must equal EMI allocated + Bounce collected. Required amount: ${formatCurrency(
+          fromMinorUnits(requiredAmountMinor)
+        )}.`
+      : '';
+
+  /** Fills in the required amount on an explicit click — never silently. */
+  const applyRequiredAmount = () => {
+    setForm((current) => ({ ...current, amount: fromMinorUnits(requiredAmountMinor) }));
+    setFieldErrors((current) => ({ ...current, amount: undefined, allocations: undefined }));
+  };
+
   const overAllocated = emis.filter((emi) => {
     const requested = toMinorUnits(allocations[emi.id]);
     return requested !== null && requested > toMinorUnits(emi.outstanding);
@@ -184,7 +217,7 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
       errors.paymentReference = 'A payment reference is required for bank collections';
     }
     if (bounceOverAmount) errors.amount = 'Bounce is part of the amount received, so it cannot exceed it';
-    if (unallocatedMinor !== 0) errors.allocations = 'Allocate the collection amount less its bounce component';
+    if (unallocatedMinor !== 0) errors.allocations = reconciliationError;
 
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
@@ -481,13 +514,52 @@ export default function CollectionFormModal({ open, loan: presetLoan = null, onC
                   </div>
                   <div className="col-6 col-md-3">
                     <div className="text-uppercase fw-semibold">Unallocated</div>
-                    <div className="fw-bold">{formatCurrency(fromMinorUnits(unallocatedMinor))}</div>
+                    <div className={`fw-bold${amountMatchesRequired ? '' : ' text-danger'}`}>
+                      {formatCurrency(fromMinorUnits(unallocatedMinor))}
+                    </div>
                   </div>
                 </div>
+
+                {/*
+                  * A non-zero Unallocated is never shown on its own: it always
+                  * carries the required amount and a one-click way to apply it,
+                  * so a negative figure can no longer leave the operator stuck
+                  * with a disabled button and nothing to act on.
+                  */}
+                {reconciliationError ? (
+                  <div className="mt-2 d-flex flex-wrap align-items-center gap-2">
+                    <span>{reconciliationError}</span>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-dark"
+                      onClick={applyRequiredAmount}
+                      disabled={submitting}
+                    >
+                      Use {formatCurrency(fromMinorUnits(requiredAmountMinor))}
+                    </button>
+                  </div>
+                ) : null}
+
                 {bounceOverAmount ? (
                   <div className="mt-2">Bounce collection cannot be more than the amount received.</div>
                 ) : null}
-                {fieldErrors.allocations ? <div className="mt-2">{fieldErrors.allocations}</div> : null}
+
+                {/*
+                  * Anything the BACKEND said about the allocation still shows
+                  * here — it is the authority, and its wording must reach the
+                  * operator. Suppressed only when it would merely repeat the
+                  * live message above.
+                  */}
+                {fieldErrors.allocations && fieldErrors.allocations !== reconciliationError ? (
+                  <div className="mt-2">{fieldErrors.allocations}</div>
+                ) : null}
+
+                {bounceMinor > 0 ? (
+                  <div className="mt-2 small">
+                    <i className="bi bi-info-circle me-1" aria-hidden="true" />
+                    Bounce collected is included in the total amount received. It is not allocated to an EMI.
+                  </div>
+                ) : null}
               </div>
             </>
           ) : null}
