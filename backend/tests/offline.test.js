@@ -10613,6 +10613,248 @@ async function runRules(rules, source) {
     );
   }
 
+  // ---------- Collection Report export: the actual button path ----------
+  {
+    /*
+     * A download was reported as still carrying the removed columns. It turned
+     * out to be the BOUNCE Collection Report's file, whose 14 headers are a
+     * different set entirely — the two reports are easy to confuse because both
+     * describe collections and both offer "Export Excel".
+     *
+     * These assertions pin which column array the Collection Report's own
+     * export path reaches, and keep the two reports' files distinguishable, so
+     * a genuine mix-up in the wiring would fail here rather than be discovered
+     * in a spreadsheet.
+     */
+    const ExcelJS3 = require('exceljs');
+    const excelSvc = require('../src/services/reportExcelService');
+    const {
+      CSV_COLUMNS: P_COLUMNS,
+      REPORTS: P_REPORTS,
+      REPORT_TITLES: P_TITLES
+    } = require('../src/config/reports');
+
+    const COLLECTION_HEADERS = [
+      'Collection Date',
+      'Loan Number',
+      'Applicant',
+      'Amount',
+      'Collected Principal',
+      'Collected Interest',
+      'Collected Bounce',
+      'EMI Collected',
+      'Ledger',
+      'Route Code',
+      'Collected By'
+    ];
+    // Every spelling of the removed fields, including the Bounce report's.
+    const FORBIDDEN = ['Collection Number', 'CIF', 'CIFID', 'Reference', 'Payment Reference', 'Status', 'Counts Toward Totals'];
+
+    /* --------- the controller binds the button to this exact column set -------- */
+
+    const controllerSrc = stripComments(
+      fs.readFileSync(path.resolve(__dirname, '..', 'src', 'controllers', 'reportController.js'), 'utf8')
+    );
+
+    record(
+      'Collection export path',
+      'the Collection Report handler is bound to REPORTS.COLLECTIONS — the key that selects its columns',
+      /const collectionReport = reportHandler\(\{\s*key: REPORTS\.COLLECTIONS,\s*run: reportService\.collectionReport,/.test(
+        controllerSrc
+      ),
+      'reportHandler({ key: REPORTS.COLLECTIONS, run: reportService.collectionReport })'
+    );
+
+    record(
+      'Collection export path',
+      'that key is what selects the columns for BOTH the workbook and the CSV — one lookup, no second source',
+      /const columns = CSV_COLUMNS\[reportKey\] \?\? \[\];/.test(
+        stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'reportExcelService.js'), 'utf8'))
+      ) && /const csv = toCsv\(rows, CSV_COLUMNS\[key\]\);/.test(controllerSrc),
+      'reportExcelService reads CSV_COLUMNS[reportKey]; the controller reads CSV_COLUMNS[key]'
+    );
+
+    record(
+      'Collection export path',
+      'the export permission gate is unchanged — reports.export is still required to download',
+      /requirePermission\(PERMISSIONS\.REPORTS_EXPORT\)/.test(
+        stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'routes', 'reportRoutes.js'), 'utf8'))
+      ),
+      'download still gated'
+    );
+
+    /* ---------------- a real workbook, built through that key ---------------- */
+
+    const fixture = {
+      collectionNumber: 'COL26-000071',
+      collectionDate: '2026-09-02',
+      status: 'POSTED',
+      loan: { loanNumber: 'LN26-000182' },
+      customer: { fullName: 'Vimal Krishna Singh', cifId: 'C000178' },
+      amount: '18500.00',
+      collectedPrincipal: '12500.00',
+      collectedInterest: '5000.00',
+      collectedBounce: '1000.00',
+      emiCollected: '17500.00',
+      ledgerType: 'CASH',
+      paymentReference: 'some-reference',
+      route: { routeCode: 'RT26-000001' },
+      createdBy: 'Super Administrator',
+      countsTowardTotals: true
+    };
+
+    const workbookFor = async (reportKey, rows) => {
+      const buffer = await excelSvc.buildReportWorkbook({
+        reportKey,
+        rows,
+        summary: {
+          totalCount: 1,
+          postedCount: 1,
+          postedAmount: '18500.00',
+          reversedCount: 0,
+          reversedAmount: '0.00',
+          netCollected: '18500.00',
+          emiCollected: '17500.00',
+          collectedPrincipal: '12500.00',
+          collectedInterest: '5000.00',
+          collectedBounce: '1000.00',
+          bounceCollectionCount: 1,
+          reversedBounce: '0.00'
+        },
+        filters: { format: 'xlsx' }
+      });
+      const book = new ExcelJS3.Workbook();
+      await book.xlsx.load(buffer);
+      return book;
+    };
+
+    const book = await workbookFor(P_REPORTS.COLLECTIONS, [fixture]);
+    const sheet = book.getWorksheet(P_TITLES[P_REPORTS.COLLECTIONS]);
+    const header = sheet.getRow(1).values.slice(1).map(String);
+
+    record(
+      'Collection export path',
+      'the generated Collection Report workbook header is EXACTLY the eleven required columns',
+      header.join('|') === COLLECTION_HEADERS.join('|'),
+      header.join(' | ')
+    );
+
+    record(
+      'Collection export path',
+      'no removed header appears anywhere in the Collection Report workbook, in any spelling',
+      (() => {
+        const everyCell = [];
+        book.eachSheet((s) => s.eachRow((r) => r.eachCell((c) => everyCell.push(String(c.value ?? '')))));
+        return FORBIDDEN.every((h) => !everyCell.includes(h));
+      })(),
+      `checked across both sheets: ${FORBIDDEN.join(', ')}`
+    );
+
+    record(
+      'Collection export path',
+      'no removed VALUE can surface under any remaining header',
+      (() => {
+        const cells = [];
+        sheet.eachRow((r) => r.eachCell((c) => cells.push(String(c.value ?? ''))));
+        return ['COL26-000071', 'C000178', 'some-reference', 'POSTED', 'true'].every((v) => !cells.includes(v));
+      })(),
+      'collection number, CIFID, reference, status and countsTowardTotals all absent'
+    );
+
+    record(
+      'Collection export path',
+      'the surviving columns are still aligned to their own data',
+      (() => {
+        const at = (h) => String(sheet.getRow(2).getCell(COLLECTION_HEADERS.indexOf(h) + 1).value ?? '');
+        return (
+          at('Loan Number') === 'LN26-000182' &&
+          at('Applicant') === 'Vimal Krishna Singh' &&
+          at('Ledger') === 'CASH' &&
+          at('Route Code') === 'RT26-000001' &&
+          at('Collected By') === 'Super Administrator'
+        );
+      })(),
+      'no off-by-one'
+    );
+
+    record(
+      'Collection export path',
+      'the exported money reconciles: Amount = EMI Collected + Collected Bounce',
+      (() => {
+        const cell = (h) => sheet.getRow(2).getCell(COLLECTION_HEADERS.indexOf(h) + 1);
+        return (
+          cell('Amount').value === 18500 &&
+          cell('EMI Collected').value === 17500 &&
+          cell('Collected Bounce').value === 1000 &&
+          cell('EMI Collected').value + cell('Collected Bounce').value === cell('Amount').value
+        );
+      })(),
+      '17500 + 1000 = 18500'
+    );
+
+    record(
+      'Collection export path',
+      'and Collected Principal + Collected Interest = EMI Collected',
+      (() => {
+        const cell = (h) => sheet.getRow(2).getCell(COLLECTION_HEADERS.indexOf(h) + 1);
+        return (
+          cell('Collected Principal').value === 12500 &&
+          cell('Collected Interest').value === 5000 &&
+          cell('Collected Principal').value + cell('Collected Interest').value === cell('EMI Collected').value
+        );
+      })(),
+      '12500 + 5000 = 17500'
+    );
+
+    /* ------------ the two reports stay tellable apart, in the file ------------ */
+
+    const bounceBook = await workbookFor(P_REPORTS.BOUNCE_COLLECTIONS, [
+      { ...fixture, emiCollected: '17500.00', collectedBounce: '1000.00' }
+    ]);
+    const bounceSheet = bounceBook.getWorksheet(P_TITLES[P_REPORTS.BOUNCE_COLLECTIONS]);
+    const bounceHeader = bounceSheet.getRow(1).values.slice(1).map(String);
+
+    record(
+      'Collection export path',
+      'the Bounce Collection export is untouched — still its own fourteen columns',
+      bounceHeader.join(' | ') ===
+        'Collection Number | Collection Date | Loan Number | Customer | CIFID | Total Received | EMI Collected | Bounce Collected | Ledger | Reference | Route | Collected By | Status | Counts Toward Totals',
+      `${bounceHeader.length} columns`
+    );
+
+    record(
+      'Collection export path',
+      'the two workbooks are distinguishable: different sheet names and different headers',
+      sheet.name === 'Collection Report' &&
+        bounceSheet.name === 'Bounce Collection Report' &&
+        header.join('|') !== bounceHeader.join('|'),
+      `"${sheet.name}" vs "${bounceSheet.name}"`
+    );
+
+    record(
+      'Collection export path',
+      'the Bounce headers cannot be produced by the Collection Report key, and vice versa',
+      P_COLUMNS[P_REPORTS.COLLECTIONS].map((c) => c.header).join('|') !==
+        P_COLUMNS[P_REPORTS.BOUNCE_COLLECTIONS].map((c) => c.header).join('|') &&
+        !COLLECTION_HEADERS.some((h) => ['Total Received', 'Bounce Collected', 'Customer', 'Route'].includes(h)),
+      'the column arrays are disjoint where it matters'
+    );
+
+    record(
+      'Collection export path',
+      'the download filename carries the report key, so the two files are told apart on disk',
+      (() => {
+        const service = stripComments(
+          fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'services', 'reportService.js'), 'utf8')
+        );
+        return /link\.download = `lms-\$\{reportKey\}-\$\{String\(stamp\)\.slice\(0, 10\)\}\.\$\{EXPORT_EXTENSION\[format\]\}`/.test(
+          service
+        );
+      })(),
+      'lms-collections-….xlsx vs lms-bounce-collections-….xlsx'
+    );
+  }
+
   // ---------- Frontend action wiring ----------
   {
     /*
