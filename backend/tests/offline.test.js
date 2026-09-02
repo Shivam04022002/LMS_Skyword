@@ -8480,8 +8480,10 @@ async function runRules(rules, source) {
           emiCollected: '2000.00',
           netCollected: '2500.00'
         },
-        moneyColumn: 6,
-        dateColumn: 2,
+        // Total Received / (no date column) / Loan Number, after the six
+        // identifier and status columns were dropped from this download.
+        moneyColumn: 3,
+        dateColumn: null,
         codeColumn: 1
       },
       [REPORTS.EMIS]: {
@@ -9590,7 +9592,7 @@ async function runRules(rules, source) {
       'Bounce report',
       'the export carries exactly the requested columns, in order',
       BC_COLUMNS[BC_REPORTS.BOUNCE_COLLECTIONS].map((c) => c.header).join(' | ') ===
-        'Collection Number | Collection Date | Loan Number | Customer | CIFID | Total Received | EMI Collected | Bounce Collected | Ledger | Reference | Route | Collected By | Status | Counts Toward Totals',
+        'Loan Number | Customer | Total Received | EMI Collected | Bounce Collected | Ledger | Route | Collected By',
       BC_COLUMNS[BC_REPORTS.BOUNCE_COLLECTIONS].map((c) => c.header).join(', ')
     );
 
@@ -10555,9 +10557,9 @@ async function runRules(rules, source) {
 
     record(
       'Collection export',
-      'the BOUNCE Collection export still carries all fourteen of its own columns',
+      'the BOUNCE Collection export keeps exactly its own eight columns',
       X_COLUMNS[X_REPORTS.BOUNCE_COLLECTIONS].map((c) => c.header).join(' | ') ===
-        'Collection Number | Collection Date | Loan Number | Customer | CIFID | Total Received | EMI Collected | Bounce Collected | Ledger | Reference | Route | Collected By | Status | Counts Toward Totals',
+        'Loan Number | Customer | Total Received | EMI Collected | Bounce Collected | Ledger | Route | Collected By',
       'separate column array, deliberately unchanged'
     );
 
@@ -10816,9 +10818,9 @@ async function runRules(rules, source) {
 
     record(
       'Collection export path',
-      'the Bounce Collection export is untouched — still its own fourteen columns',
+      'the Bounce Collection export keeps exactly its own eight columns',
       bounceHeader.join(' | ') ===
-        'Collection Number | Collection Date | Loan Number | Customer | CIFID | Total Received | EMI Collected | Bounce Collected | Ledger | Reference | Route | Collected By | Status | Counts Toward Totals',
+        'Loan Number | Customer | Total Received | EMI Collected | Bounce Collected | Ledger | Route | Collected By',
       `${bounceHeader.length} columns`
     );
 
@@ -10852,6 +10854,256 @@ async function runRules(rules, source) {
         );
       })(),
       'lms-collections-….xlsx vs lms-bounce-collections-….xlsx'
+    );
+  }
+
+  // ---------- Bounce Collection export: narrowed to eight columns ----------
+  {
+    /*
+     * Six columns were dropped from the BOUNCE Collection Report's DOWNLOAD:
+     * Collection Number, Collection Date, CIFID, Reference, Status and Counts
+     * Toward Totals. All six remain on that report's screen and in its API
+     * response — only the file was narrowed.
+     *
+     * The Collection Report's own export is a separate array and keeps its own
+     * columns, Collection Date included.
+     */
+    const ExcelJS4 = require('exceljs');
+    const excelSvc4 = require('../src/services/reportExcelService');
+    const {
+      CSV_COLUMNS: D_COLS,
+      REPORTS: D_REPS,
+      REPORT_TITLES: D_TITLES,
+      SUMMARY_FIELDS: D_SUM
+    } = require('../src/config/reports');
+    const { toCsv: toCsv4 } = require('../src/utils/csv');
+
+    const BOUNCE_HEADERS = [
+      'Loan Number',
+      'Customer',
+      'Total Received',
+      'EMI Collected',
+      'Bounce Collected',
+      'Ledger',
+      'Route',
+      'Collected By'
+    ];
+    const REMOVED = ['Collection Number', 'Collection Date', 'CIFID', 'Reference', 'Status', 'Counts Toward Totals'];
+
+    /* A row carrying every removed field, so a leak would be visible. */
+    const fixture = {
+      collectionNumber: 'COL26-000071',
+      collectionDate: '2026-09-02',
+      status: 'POSTED',
+      loan: { loanNumber: 'LN26-000182' },
+      customer: { fullName: 'Vimal Krishna Singh', cifId: 'C000178' },
+      amount: '18500.00',
+      emiCollected: '17500.00',
+      collectedBounce: '1000.00',
+      ledgerType: 'CASH',
+      paymentReference: 'REF-00042',
+      route: { routeCode: 'RT26-000001' },
+      createdBy: 'Super Administrator',
+      countsTowardTotals: true
+    };
+
+    const summary = {
+      collectedBounce: '1000.00',
+      bounceCollectionCount: 1,
+      postedCount: 1,
+      postedAmount: '18500.00',
+      reversedCount: 0,
+      reversedBounce: '0.00',
+      emiCollected: '17500.00',
+      netCollected: '18500.00'
+    };
+
+    const buffer = await excelSvc4.buildReportWorkbook({
+      reportKey: D_REPS.BOUNCE_COLLECTIONS,
+      rows: [fixture],
+      summary,
+      filters: { format: 'xlsx' }
+    });
+    const book = new ExcelJS4.Workbook();
+    await book.xlsx.load(buffer);
+    const sheet = book.getWorksheet(D_TITLES[D_REPS.BOUNCE_COLLECTIONS]);
+    const header = sheet.getRow(1).values.slice(1).map(String);
+    const at = (h) => sheet.getRow(2).getCell(BOUNCE_HEADERS.indexOf(h) + 1);
+
+    record(
+      'Bounce export columns',
+      'the generated Bounce workbook has EXACTLY eight columns',
+      header.length === 8,
+      `${header.length} columns`
+    );
+
+    record(
+      'Bounce export columns',
+      'the eight headers are exactly the required set, in the required order',
+      header.join('|') === BOUNCE_HEADERS.join('|'),
+      header.join(' | ')
+    );
+
+    record(
+      'Bounce export columns',
+      'all six removed headers are absent from the whole workbook, in any spelling',
+      (() => {
+        const everyCell = [];
+        book.eachSheet((s) => s.eachRow((r) => r.eachCell((c) => everyCell.push(String(c.value ?? '')))));
+        return [...REMOVED, 'CIF', 'Payment Reference'].every((h) => !everyCell.includes(h));
+      })(),
+      REMOVED.join(', ')
+    );
+
+    record(
+      'Bounce export columns',
+      'no removed VALUE reaches any cell under any remaining header',
+      (() => {
+        const cells = [];
+        sheet.eachRow((r) =>
+          r.eachCell((c) =>
+            cells.push(c.value instanceof Date ? c.value.toISOString().slice(0, 10) : String(c.value ?? ''))
+          )
+        );
+        return ['COL26-000071', '2026-09-02', 'C000178', 'REF-00042', 'POSTED', 'true'].every((v) => !cells.includes(v));
+      })(),
+      'collection number, date, CIFID, reference, status and countsTowardTotals all absent'
+    );
+
+    record(
+      'Bounce export columns',
+      'NO COLUMN SHIFT: every remaining column still carries its own value',
+      (() => {
+        const text = (h) => String(at(h).value ?? '');
+        return (
+          text('Loan Number') === 'LN26-000182' &&
+          text('Customer') === 'Vimal Krishna Singh' &&
+          text('Ledger') === 'CASH' &&
+          text('Route') === 'RT26-000001' &&
+          text('Collected By') === 'Super Administrator'
+        );
+      })(),
+      'nothing shifted left onto the wrong data'
+    );
+
+    record(
+      'Bounce export columns',
+      'money stays numeric with the INR format, and still reconciles',
+      (() => {
+        const money = ['Total Received', 'EMI Collected', 'Bounce Collected'];
+        return (
+          money.every((h) => typeof at(h).value === 'number' && at(h).numFmt === '₹#,##0.00') &&
+          at('Total Received').value === 18500 &&
+          at('EMI Collected').value === 17500 &&
+          at('Bounce Collected').value === 1000 &&
+          at('EMI Collected').value + at('Bounce Collected').value === at('Total Received').value
+        );
+      })(),
+      '17500 + 1000 = 18500'
+    );
+
+    record(
+      'Bounce export columns',
+      'the Summary sheet is unchanged — all eight bounce totals still exported',
+      (() => {
+        const summarySheet = book.getWorksheet('Summary');
+        const labels = [];
+        summarySheet.eachRow((r) => labels.push(String(r.getCell(1).value ?? '')));
+        return (
+          book.worksheets.length === 2 &&
+          D_SUM[D_REPS.BOUNCE_COLLECTIONS].length === 8 &&
+          D_SUM[D_REPS.BOUNCE_COLLECTIONS].every((f) => labels.includes(f.label))
+        );
+      })(),
+      D_SUM[D_REPS.BOUNCE_COLLECTIONS].map((f) => f.label).join(', ')
+    );
+
+    record(
+      'Bounce export columns',
+      'the CSV variant matches the workbook — one column definition, not two',
+      (() => {
+        const header0 = toCsv4([fixture], D_COLS[D_REPS.BOUNCE_COLLECTIONS])
+          .split(/\r?\n/)[0]
+          .replace(/^﻿/, '');
+        return header0 === BOUNCE_HEADERS.join(',') && REMOVED.every((h) => !header0.includes(h));
+      })(),
+      'CSV and XLSX cannot disagree'
+    );
+
+    /* --------------------- every other export is untouched -------------------- */
+
+    record(
+      'Bounce export columns',
+      'the Collection Report export is unchanged — eleven columns, still led by Collection Date',
+      D_COLS[D_REPS.COLLECTIONS].length === 11 &&
+        D_COLS[D_REPS.COLLECTIONS].map((c) => c.header).join(' | ') ===
+          'Collection Date | Loan Number | Applicant | Amount | Collected Principal | Collected Interest | Collected Bounce | EMI Collected | Ledger | Route Code | Collected By',
+      D_COLS[D_REPS.COLLECTIONS].map((c) => c.header).join(' | ')
+    );
+
+    record(
+      'Bounce export columns',
+      'the Loan, EMI and Demand exports are unchanged',
+      D_COLS[D_REPS.LOANS].length === 20 &&
+        D_COLS[D_REPS.EMIS].length === 15 &&
+        D_COLS[D_REPS.DEMAND_COLLECTIONS].length === 9 &&
+        D_COLS[D_REPS.LOANS].some((c) => c.header === 'Status') &&
+        D_COLS[D_REPS.EMIS].some((c) => c.header === 'Status'),
+      `loans=${D_COLS[D_REPS.LOANS].length} emis=${D_COLS[D_REPS.EMIS].length} demand=${D_COLS[D_REPS.DEMAND_COLLECTIONS].length} — Status kept where it belongs`
+    );
+
+    record(
+      'Bounce export columns',
+      'no second export definition was introduced — still one array per report',
+      Object.keys(D_COLS).length === Object.values(D_REPS).length &&
+        Object.values(D_REPS).every((k) => Array.isArray(D_COLS[k])),
+      `${Object.keys(D_COLS).length} column arrays for ${Object.values(D_REPS).length} reports`
+    );
+
+    /* ----------------- the screen and the API keep every field ---------------- */
+
+    record(
+      'Bounce export columns',
+      'the Bounce SCREEN still shows all six removed fields',
+      (() => {
+        const page = stripComments(
+          fs.readFileSync(
+            path.resolve(__dirname, '..', '..', 'frontend', 'src', 'pages', 'reports', 'BounceCollectionReportPage.jsx'),
+            'utf8'
+          )
+        );
+        const head = (page.match(/<thead[\s\S]*?<\/thead>/) ?? [''])[0];
+        return (
+          ['Collection', 'Date', 'CIFID', 'Reference', 'Status'].every((h) => new RegExp(`>${h}</th>`).test(head)) &&
+          /c\.collectionNumber/.test(page) &&
+          /formatDate\(c\.collectionDate\)/.test(page) &&
+          /c\.customer\?\.cifId/.test(page) &&
+          /c\.paymentReference/.test(page) &&
+          /countsTowardTotals/.test(page)
+        );
+      })(),
+      'screen unchanged'
+    );
+
+    record(
+      'Bounce export columns',
+      'the API still returns all six removed fields on every row',
+      (() => {
+        const service = stripComments(
+          fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'reportService.js'), 'utf8')
+        );
+        const start = service.indexOf('const collections = rows.map');
+        const rowShape = service.slice(start, service.indexOf('collectionReportSummary(where', start));
+        return (
+          /collectionNumber: collection\.collectionNumber/.test(rowShape) &&
+          /collectionDate: collection\.collectionDate/.test(rowShape) &&
+          /cifId: collection\.Customer\.cifId/.test(rowShape) &&
+          /paymentReference: collection\.paymentReference/.test(rowShape) &&
+          /status: collection\.status/.test(rowShape) &&
+          /countsTowardTotals: posted/.test(rowShape)
+        );
+      })(),
+      'reportService row shape unchanged — the bounce report reuses it'
     );
   }
 

@@ -217,20 +217,14 @@ const CSV_COLUMNS = Object.freeze({
    * assessed. Total Received = EMI Collected + Bounce Collected, per row.
    */
   [REPORTS.BOUNCE_COLLECTIONS]: [
-    { header: 'Collection Number', path: 'collectionNumber', type: 'code' },
-    { header: 'Collection Date', path: 'collectionDate', type: 'date' },
     { header: 'Loan Number', path: 'loan.loanNumber', type: 'code' },
     { header: 'Customer', path: 'customer.fullName' },
-    { header: 'CIFID', path: 'customer.cifId', type: 'code' },
     { header: 'Total Received', path: 'amount', type: 'money' },
     { header: 'EMI Collected', path: 'emiCollected', type: 'money' },
     { header: 'Bounce Collected', path: 'collectedBounce', type: 'money' },
     { header: 'Ledger', path: 'ledgerType' },
-    { header: 'Reference', path: 'paymentReference', type: 'code' },
     { header: 'Route', path: 'route.routeCode', type: 'code' },
     { header: 'Collected By', path: 'createdBy' },
-    { header: 'Status', path: 'status' },
-    { header: 'Counts Toward Totals', path: 'countsTowardTotals' }
   ],
   [REPORTS.DEMAND_COLLECTIONS]: [
     { header: 'Route Code', path: 'route.routeCode', type: 'code' },
