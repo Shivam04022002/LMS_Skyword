@@ -32,6 +32,25 @@ router.get('/', requirePermission(PERMISSIONS.CUSTOMERS_VIEW), validate(listCust
  * one that writes, and it re-validates the workbook itself rather than trusting
  * anything the preview returned.
  */
+/**
+ * Excel download of the customer list, matching the caller's current search and
+ * filters. Declared before /:id for the same reason the import routes are, so
+ * "export" is never read as a customer id.
+ *
+ * TWO permissions, both required. `customers.view` is who may see this data at
+ * all; `reports.export` is who may take it out of the system as a file. That
+ * split already exists — a COLLECTOR holds reports.view but is deliberately
+ * denied reports.export, because a downloaded file leaves the system's access
+ * controls behind. Reusing it keeps one rule about downloads instead of two,
+ * and adds no new permission to the catalogue.
+ */
+router.get(
+  '/export',
+  requirePermission(PERMISSIONS.CUSTOMERS_VIEW, PERMISSIONS.REPORTS_EXPORT),
+  validate(listCustomersRules),
+  customerController.exportCustomers
+);
+
 router.get('/import/template', requirePermission(PERMISSIONS.CUSTOMERS_IMPORT), customerImportController.downloadTemplate);
 
 router.post(

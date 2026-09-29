@@ -8,7 +8,7 @@ import CustomerImportModal from '../../components/customers/CustomerImportModal'
 import { CustomerStatusBadge, CifIdBadge } from '../../components/customers/CustomerBadges';
 import usePermissions from '../../hooks/usePermissions';
 import useDebouncedValue from '../../hooks/useDebouncedValue';
-import { getCustomers, updateCustomerStatus } from '../../services/customerService';
+import { getCustomers, updateCustomerStatus, exportCustomersExcel } from '../../services/customerService';
 import { PERMISSIONS } from '../../utils/permissions';
 
 const PAGE_SIZE = 20;
@@ -33,12 +33,20 @@ export default function CustomersListPage() {
   const [busyId, setBusyId] = useState(null);
   const [formModal, setFormModal] = useState({ open: false, mode: 'create', customer: null });
   const [importOpen, setImportOpen] = useState(false);
+  // Guards the export button against a second click while one is in flight.
+  const [exporting, setExporting] = useState(false);
 
   // One request after typing settles, rather than one per keystroke.
   const debouncedSearch = useDebouncedValue(search, 400);
 
   const canCreate = can(PERMISSIONS.CUSTOMERS_CREATE);
   const canImport = can(PERMISSIONS.CUSTOMERS_IMPORT);
+  /*
+   * Both permissions, matching the endpoint: customers.view is who may see this
+   * data, reports.export is who may take it out as a file. Hiding the button is
+   * convenience only — the backend refuses the download either way.
+   */
+  const canExport = can(PERMISSIONS.CUSTOMERS_VIEW) && can(PERMISSIONS.REPORTS_EXPORT);
   const canUpdate = can(PERMISSIONS.CUSTOMERS_UPDATE);
   const canActivate = can(PERMISSIONS.CUSTOMERS_ACTIVATE);
   const canDeactivate = can(PERMISSIONS.CUSTOMERS_DEACTIVATE);
@@ -92,6 +100,24 @@ export default function CustomersListPage() {
     await loadCustomers();
   };
 
+  /*
+   * Exports what the screen is currently showing — the same search and filters,
+   * every matching customer, not just this page. `page` and `limit` are not
+   * sent, so the download is never silently cut to one page.
+   */
+  const handleExport = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setError('');
+    try {
+      await exportCustomersExcel({ search: debouncedSearch, ...filters });
+    } catch (requestError) {
+      setError(requestError.message || 'Unable to download the customer list.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const clearFilters = () => {
     setSearch('');
     setFilters({ status: '', state: '', city: '' });
@@ -105,6 +131,27 @@ export default function CustomersListPage() {
           <p className="text-secondary mb-0">Central customer register. Each customer has a permanent CIFID.</p>
         </div>
         <div className="d-flex flex-wrap gap-2">
+          {canExport ? (
+            <button
+              type="button"
+              className="btn btn-outline-secondary"
+              onClick={handleExport}
+              disabled={exporting || loading}
+              title="Download the customers matching the current filters"
+            >
+              {exporting ? (
+                <>
+                  <span className="spinner-border spinner-border-sm me-2" aria-hidden="true" />
+                  Preparing…
+                </>
+              ) : (
+                <>
+                  <i className="bi bi-file-earmark-excel me-2" aria-hidden="true" />
+                  Download Excel
+                </>
+              )}
+            </button>
+          ) : null}
           {canImport ? (
             <button type="button" className="btn btn-outline-primary" onClick={() => setImportOpen(true)}>
               <i className="bi bi-file-earmark-arrow-up me-2" aria-hidden="true" />

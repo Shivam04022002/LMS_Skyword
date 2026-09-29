@@ -10670,9 +10670,15 @@ async function runRules(rules, source) {
     record(
       'Collection export path',
       'that key is what selects the columns for BOTH the workbook and the CSV — one lookup, no second source',
-      /const columns = CSV_COLUMNS\[reportKey\] \?\? \[\];/.test(
+      // A caller may pass its own columns (the customer export does), but for a
+      // REPORT the key remains the only thing that selects them.
+      /const columns = columnsOverride \?\? CSV_COLUMNS\[reportKey\] \?\? \[\];/.test(
         stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'reportExcelService.js'), 'utf8'))
-      ) && /const csv = toCsv\(rows, CSV_COLUMNS\[key\]\);/.test(controllerSrc),
+      ) &&
+        /const csv = toCsv\(rows, CSV_COLUMNS\[key\]\);/.test(controllerSrc) &&
+        // The report controller never passes an override, so every report still
+        // takes its columns from the registry.
+        !/columns:/.test(controllerSrc),
       'reportExcelService reads CSV_COLUMNS[reportKey]; the controller reads CSV_COLUMNS[key]'
     );
 
@@ -11263,6 +11269,852 @@ async function runRules(rules, source) {
         return args.length > 0 && suspicious.length === 0;
       })(),
       'every call site passes a currency value'
+    );
+  }
+
+  // ---------- Customer list: Excel download ----------
+  {
+    const ExcelJS5 = require('exceljs');
+    const excelSvc5 = require('../src/services/reportExcelService');
+    const customerSvc = require('../src/services/customerService');
+    const {
+      CUSTOMER_EXPORT_COLUMNS,
+      CUSTOMER_EXPORT_ATTRIBUTES,
+      CUSTOMER_EXPORT_SHEET_TITLE,
+      customerExportFilename
+    } = require('../src/config/customers');
+    const { EXPORT_MAX_ROWS: CUST_MAX } = require('../src/config/reports');
+
+    const EXPECTED_HEADERS = [
+      'CIFID', 'First Name', 'Middle Name', 'Last Name', 'Full Name', 'Mobile', 'Alternate Mobile',
+      'Email', 'Gender', 'Date of Birth', 'Address Line 1', 'Address Line 2', 'City', 'State',
+      'Pincode', 'Status', 'Created Date'
+    ];
+
+    /* ------------------------------ what it exports ----------------------------- */
+
+    record(
+      'Customer export',
+      'the workbook declares exactly the seventeen agreed columns, in order',
+      CUSTOMER_EXPORT_COLUMNS.map((c) => c.header).join('|') === EXPECTED_HEADERS.join('|'),
+      CUSTOMER_EXPORT_COLUMNS.map((c) => c.header).join(', ')
+    );
+
+    record(
+      'Customer export',
+      'no password, token or other secret can reach the file, and nothing is derived',
+      (() => {
+        const paths = CUSTOMER_EXPORT_COLUMNS.map((c) => c.path);
+        const forbidden = /password|token|secret|hash|salt|otp/i;
+        // Every path is a real stored column on the Customer model.
+        const attributes = Object.keys(Customer.getAttributes());
+        return paths.every((p) => !forbidden.test(p)) && paths.every((p) => attributes.includes(p));
+      })(),
+      'every column maps to a stored Customer attribute'
+    );
+
+    record(
+      'Customer export',
+      'the extra personal fields on file are deliberately NOT exported',
+      ['fatherName', 'motherName', 'maritalStatus', 'occupation'].every(
+        (f) => !CUSTOMER_EXPORT_COLUMNS.some((c) => c.path === f)
+      ) &&
+        // ...but they do still exist on the customer, so this is a choice, not an oversight.
+        ['fatherName', 'motherName', 'maritalStatus', 'occupation'].every((f) =>
+          Object.keys(Customer.getAttributes()).includes(f)
+        ),
+      "father's name, mother's name, marital status and occupation stay out of the download"
+    );
+
+    record(
+      'Customer export',
+      'identifiers are declared as TEXT and dates as dates',
+      (() => {
+        const type = (h) => CUSTOMER_EXPORT_COLUMNS.find((c) => c.header === h)?.type;
+        return (
+          ['CIFID', 'Mobile', 'Alternate Mobile', 'Pincode'].every((h) => type(h) === 'code') &&
+          ['Date of Birth', 'Created Date'].every((h) => type(h) === 'date')
+        );
+      })(),
+      'CIFID / mobiles / pincode as code; both dates as date'
+    );
+
+    record(
+      'Customer export',
+      'only the exported columns are read from the database',
+      CUSTOMER_EXPORT_ATTRIBUTES.join('|') === CUSTOMER_EXPORT_COLUMNS.map((c) => c.path).join('|') &&
+        (() => {
+          const src = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'customerService.js'), 'utf8'));
+          const fn = src.slice(src.indexOf('async function exportCustomers'), src.indexOf('async function getCustomerById'));
+          return /attributes: \[\.\.\.CUSTOMER_EXPORT_ATTRIBUTES\]/.test(fn) && /raw: true/.test(fn);
+        })(),
+      'no audit joins, no unused fields'
+    );
+
+    record(
+      'Customer export',
+      'the filename is LMS_Customers_YYYY-MM-DD.xlsx',
+      customerExportFilename(new Date('2026-09-29T11:00:00Z')) === 'LMS_Customers_2026-09-29.xlsx' &&
+        /^LMS_Customers_\d{4}-\d{2}-\d{2}\.xlsx$/.test(customerExportFilename()),
+      customerExportFilename(new Date('2026-09-29T11:00:00Z'))
+    );
+
+    /* ------------------- a real workbook, read back from bytes ------------------- */
+
+    const CUSTOMERS = [
+      {
+        cifId: 'C000178', firstName: 'Vimal', middleName: 'Krishna', lastName: 'Singh',
+        fullName: 'Vimal Krishna Singh', mobile: '9876543210', alternateMobile: '0123456789',
+        email: 'vimal@example.com', gender: 'MALE', dateOfBirth: '1990-04-17',
+        addressLine1: '12 MG Road', addressLine2: 'Near Park', city: 'Patna', state: 'Bihar',
+        pincode: '800001', status: 'ACTIVE', createdAt: '2026-08-25T10:00:46.000Z'
+      },
+      {
+        // Formula-like text in every free-text field, and a blank optional field.
+        cifId: 'C000179', firstName: '=1+1', middleName: null, lastName: '-2-2',
+        fullName: '=HYPERLINK("http://evil","click")', mobile: '9000000001', alternateMobile: null,
+        email: '+1+1@example.com', gender: 'FEMALE', dateOfBirth: null,
+        addressLine1: '@SUM(A1)', addressLine2: null, city: 'Gaya', state: 'Bihar',
+        pincode: '823001', status: 'INACTIVE', createdAt: '2026-09-01T06:30:00.000Z'
+      }
+    ];
+
+    const custBuffer = await excelSvc5.buildReportWorkbook({
+      columns: [...CUSTOMER_EXPORT_COLUMNS],
+      title: CUSTOMER_EXPORT_SHEET_TITLE,
+      summaryFields: [],
+      rows: CUSTOMERS,
+      filters: { status: 'ACTIVE', search: 'vimal' }
+    });
+    const custBook = new ExcelJS5.Workbook();
+    await custBook.xlsx.load(custBuffer);
+    const custSheet = custBook.getWorksheet(CUSTOMER_EXPORT_SHEET_TITLE);
+    const custHeader = custSheet.getRow(1).values.slice(1).map(String);
+    const at = (row, header) => custSheet.getRow(row).getCell(EXPECTED_HEADERS.indexOf(header) + 1);
+
+    record(
+      'Customer export',
+      'the generated workbook is a valid package with the expected header row and one row per customer',
+      custBuffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) &&
+        custHeader.join('|') === EXPECTED_HEADERS.join('|') &&
+        custSheet.rowCount === CUSTOMERS.length + 1,
+      `${custBuffer.length} bytes, ${custSheet.rowCount - 1} data rows`
+    );
+
+    record(
+      'Customer export',
+      'CIFID, both mobiles and the pincode come back as EXACT text, leading zeros intact',
+      (() => {
+        const textCells = ['CIFID', 'Mobile', 'Alternate Mobile', 'Pincode'];
+        return (
+          textCells.every((h) => at(2, h).numFmt === '@') &&
+          at(2, 'CIFID').value === 'C000178' &&
+          at(2, 'Mobile').value === '9876543210' &&
+          // A leading zero survives, which a numeric cell would have eaten.
+          at(2, 'Alternate Mobile').value === '0123456789' &&
+          at(2, 'Pincode').value === '800001' &&
+          typeof at(2, 'Mobile').value === 'string'
+        );
+      })(),
+      `CIFID=${at(2, 'CIFID').value} alt mobile=${at(2, 'Alternate Mobile').value} pincode=${at(2, 'Pincode').value}`
+    );
+
+    record(
+      'Customer export',
+      'both date columns are real Excel date cells, not text',
+      at(2, 'Date of Birth').value instanceof Date &&
+        at(2, 'Date of Birth').numFmt === 'yyyy-mm-dd' &&
+        at(2, 'Created Date').value instanceof Date &&
+        at(2, 'Created Date').numFmt === 'yyyy-mm-dd' &&
+        at(2, 'Created Date').value.toISOString().slice(0, 10) === '2026-08-25',
+      `DOB=${at(2, 'Date of Birth').value?.toISOString?.().slice(0, 10)} created=${at(2, 'Created Date').value?.toISOString?.().slice(0, 10)}`
+    );
+
+    record(
+      'Customer export',
+      'FORMULA INJECTION: formula-like text stays inert text and is never a live formula',
+      (() => {
+        const cells = [at(3, 'First Name'), at(3, 'Last Name'), at(3, 'Full Name'), at(3, 'Email'), at(3, 'Address Line 1')];
+        return (
+          // ValueType.String, and no formula on any of them.
+          cells.every((c) => c.type === ExcelJS5.ValueType.String && c.formula === undefined) &&
+          // The value is preserved exactly — not mangled by an escaping prefix.
+          at(3, 'First Name').value === '=1+1' &&
+          at(3, 'Full Name').value === '=HYPERLINK("http://evil","click")' &&
+          at(3, 'Last Name').value === '-2-2' &&
+          at(3, 'Email').value === '+1+1@example.com' &&
+          at(3, 'Address Line 1').value === '@SUM(A1)'
+        );
+      })(),
+      '=, +, - and @ prefixes all exported as literal strings'
+    );
+
+    record(
+      'Customer export',
+      'blank optional fields stay blank rather than becoming zero or "null"',
+      at(3, 'Middle Name').value === null &&
+        at(3, 'Alternate Mobile').value === null &&
+        at(3, 'Date of Birth').value === null,
+      'null in, empty cell out'
+    );
+
+    record(
+      'Customer export',
+      'the sheet is readable: styled header, frozen top row, filters and sized columns',
+      (() => {
+        const header = custSheet.getRow(1);
+        return (
+          header.font?.bold === true &&
+          custSheet.views?.[0]?.state === 'frozen' &&
+          custSheet.views[0].ySplit === 1 &&
+          Boolean(custSheet.autoFilter) &&
+          EXPECTED_HEADERS.every((_, i) => {
+            const w = custSheet.getColumn(i + 1).width;
+            return w >= 10 && w <= 46;
+          })
+        );
+      })(),
+      `frozen header, autoFilter ${JSON.stringify(custSheet.autoFilter)}`
+    );
+
+    record(
+      'Customer export',
+      'the Summary sheet records the row count and the filters that produced the file',
+      (() => {
+        const summary = custBook.getWorksheet('Summary');
+        const text = [];
+        summary.eachRow((r) => r.eachCell((c) => text.push(String(c.value ?? ''))));
+        return (
+          custBook.worksheets.length === 2 &&
+          text.includes('Customers') &&
+          text.includes('Rows exported') &&
+          text.includes(String(CUSTOMERS.length)) &&
+          text.includes('status') &&
+          text.includes('search')
+        );
+      })(),
+      'generated-at, row count and active filters'
+    );
+
+    {
+      const emptyBuffer = await excelSvc5.buildReportWorkbook({
+        columns: [...CUSTOMER_EXPORT_COLUMNS],
+        title: CUSTOMER_EXPORT_SHEET_TITLE,
+        summaryFields: [],
+        rows: [],
+        filters: { search: 'no-such-customer' }
+      });
+      const emptyBook = new ExcelJS5.Workbook();
+      await emptyBook.xlsx.load(emptyBuffer);
+      const emptySheet = emptyBook.getWorksheet(CUSTOMER_EXPORT_SHEET_TITLE);
+      record(
+        'Customer export',
+        'EMPTY RESULT: headers are present, there are no data rows, and the file is still valid',
+        emptyBuffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) &&
+          emptySheet.getRow(1).values.slice(1).map(String).join('|') === EXPECTED_HEADERS.join('|') &&
+          emptySheet.rowCount === 1,
+        `${emptySheet.rowCount - 1} data rows`
+      );
+    }
+
+    /* ---------------------- filters, paging and the query ---------------------- */
+
+    record(
+      'Customer export',
+      'the export and the on-screen list share ONE query builder, so they cannot drift',
+      (() => {
+        const src = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'customerService.js'), 'utf8'));
+        const list = src.slice(src.indexOf('async function listCustomers'), src.indexOf('async function exportCustomers'));
+        const exp = src.slice(src.indexOf('async function exportCustomers'), src.indexOf('async function getCustomerById'));
+        return (
+          /function buildCustomerQuery\(/.test(src) &&
+          /const \{ where, order \} = buildCustomerQuery\(filters\);/.test(list) &&
+          /const \{ where, order \} = buildCustomerQuery\(filters\);/.test(exp) &&
+          // The export builds no WHERE of its own.
+          !/Op\.(like|or)/.test(exp)
+        );
+      })(),
+      'one buildCustomerQuery, used by both'
+    );
+
+    record(
+      'Customer export',
+      'every list filter reaches the query: search, status, city, state, gender and sorting',
+      (() => {
+        const q = customerSvc.buildCustomerQuery({ search: 'raj', status: 'ACTIVE', city: 'Patna', state: 'Bihar', gender: 'MALE', sortBy: 'cifId', sortOrder: 'ASC' });
+        const keys = Object.getOwnPropertySymbols(q.where).concat(Object.keys(q.where));
+        return (
+          q.where.status === 'ACTIVE' && q.where.city === 'Patna' && q.where.state === 'Bihar' &&
+          q.where.gender === 'MALE' && keys.length >= 5 &&
+          q.order[0][0] === 'cifId' && q.order[0][1] === 'ASC'
+        );
+      })(),
+      'same filter set as the list endpoint'
+    );
+
+    record(
+      'Customer export',
+      'a phone-shaped search still matches the alternate mobile, exactly as the list does',
+      (() => {
+        const q = customerSvc.buildCustomerQuery({ search: '+91 98765 43210' });
+        const or = q.where[Object.getOwnPropertySymbols(q.where)[0]];
+        return Array.isArray(or) && or.some((c) => c.alternateMobile);
+      })(),
+      'the digit-normalising branch is shared, not reimplemented'
+    );
+
+    record(
+      'Customer export',
+      'an unsortable field falls back to createdAt rather than reaching SQL',
+      customerSvc.buildCustomerQuery({ sortBy: 'password' }).order[0][0] === 'createdAt',
+      'sort whitelist honoured'
+    );
+
+    record(
+      'Customer export',
+      'the export IGNORES page and limit, so it is never silently cut to one page',
+      (() => {
+        const src = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'customerService.js'), 'utf8'));
+        const fn = src.slice(src.indexOf('async function exportCustomers'), src.indexOf('async function getCustomerById'));
+        return !/limit:|offset:|pageSize/.test(fn) && /Customer\.findAll/.test(fn);
+      })(),
+      'findAll with no limit or offset'
+    );
+
+    record(
+      'Customer export',
+      'it refuses rather than truncates above the export row limit',
+      (() => {
+        const src = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'customerService.js'), 'utf8'));
+        const fn = src.slice(src.indexOf('async function exportCustomers'), src.indexOf('async function getCustomerById'));
+        return /total > EXPORT_MAX_ROWS/.test(fn) && /ApiError\.badRequest/.test(fn) && CUST_MAX === 10000;
+      })(),
+      `same ${CUST_MAX} row ceiling as the report exports`
+    );
+
+    /* ------------------------ endpoint, permissions, scope ---------------------- */
+
+    {
+      const customerRouter = require('../src/routes/customerRoutes');
+      const layers = customerRouter.stack.filter((l) => l.route);
+      const paths = layers.map((l) => l.route.path);
+      record(
+        'Customer export',
+        'GET /export is mounted BEFORE /:id, so "export" is never read as a customer id',
+        paths.includes('/export') &&
+          paths.indexOf('/export') < paths.indexOf('/:id') &&
+          Object.keys(layers.find((l) => l.route.path === '/export').route.methods).join() === 'get',
+        paths.join(' | ')
+      );
+    }
+
+    record(
+      'Customer export',
+      'the endpoint requires BOTH customers.view and reports.export, server-side',
+      (() => {
+        const src = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'routes', 'customerRoutes.js'), 'utf8'));
+        return /requirePermission\(PERMISSIONS\.CUSTOMERS_VIEW, PERMISSIONS\.REPORTS_EXPORT\)/.test(src) &&
+          /validate\(listCustomersRules\)/.test(src);
+      })(),
+      'and the same query validation as the list'
+    );
+
+    {
+      // requirePermission requires ALL of the permissions it is given.
+      const gate = requirePermission(PERMISSIONS.CUSTOMERS_VIEW, PERMISSIONS.REPORTS_EXPORT);
+      const anon = await runMiddleware(gate, {});
+      const viewOnly = await runMiddleware(gate, { user: buildUser({ permissions: [PERMISSIONS.CUSTOMERS_VIEW] }) });
+      const exportOnly = await runMiddleware(gate, { user: buildUser({ permissions: [PERMISSIONS.REPORTS_EXPORT] }) });
+      const both = await runMiddleware(gate, { user: buildUser({ permissions: [PERMISSIONS.CUSTOMERS_VIEW, PERMISSIONS.REPORTS_EXPORT] }) });
+      record(
+        'Customer export',
+        'anonymous 401, either permission alone 403, both 200',
+        anon === 401 && viewOnly === 403 && exportOnly === 403 && both === 200,
+        `anon=${anon} view-only=${viewOnly} export-only=${exportOnly} both=${both}`
+      );
+    }
+
+    record(
+      'Customer export',
+      'a COLLECTOR cannot download customers, and the role matrix was not widened',
+      (() => {
+        const collector = ROLE_PERMISSION_MATRIX[ROLES.COLLECTOR];
+        const staff = ROLE_PERMISSION_MATRIX[ROLES.STAFF];
+        return (
+          !collector.includes(PERMISSIONS.REPORTS_EXPORT) &&
+          !collector.includes(PERMISSIONS.CUSTOMERS_VIEW) &&
+          staff.length === 0 &&
+          // The roles that legitimately keep it.
+          [ROLES.ADMIN, ROLES.MANAGER].every(
+            (r) => ROLE_PERMISSION_MATRIX[r].includes(PERMISSIONS.CUSTOMERS_VIEW) && ROLE_PERMISSION_MATRIX[r].includes(PERMISSIONS.REPORTS_EXPORT)
+          )
+        );
+      })(),
+      'ADMIN and MANAGER may export; COLLECTOR and STAFF may not'
+    );
+
+    record(
+      'Customer export',
+      'NO NEW PERMISSION was added to the catalogue',
+      !PERMISSION_DEFINITIONS.some((p) => /customers\.export/i.test(p.name)) &&
+        PERMISSION_DEFINITIONS.length === Object.keys(PERMISSIONS).length,
+      `${PERMISSION_DEFINITIONS.length} permissions, unchanged`
+    );
+
+    record(
+      'Customer export',
+      'the download is audited, like every other export that leaves the system',
+      (() => {
+        const src = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'controllers', 'customerController.js'), 'utf8'));
+        return /auditService\.record\(/.test(src) && /AUDIT_ACTIONS\.REPORT_EXPORTED/.test(src) && /rowCount/.test(src);
+      })(),
+      'REPORT_EXPORTED against the CUSTOMER entity'
+    );
+
+    record(
+      'Customer export',
+      'the response carries the XLSX content type and a filename',
+      (() => {
+        const src = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'controllers', 'customerController.js'), 'utf8'));
+        return (
+          /openxmlformats-officedocument\.spreadsheetml\.sheet/.test(src) &&
+          /Content-Disposition.*attachment; filename="\$\{customerExportFilename\(generatedAt\)\}"/.test(src) &&
+          /Content-Length/.test(src)
+        );
+      })(),
+      'attachment with LMS_Customers_<date>.xlsx'
+    );
+
+    /* -------------------------------- the button -------------------------------- */
+
+    {
+      const page = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'pages', 'customers', 'CustomersListPage.jsx'), 'utf8')
+      );
+      const service = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'services', 'customerService.js'), 'utf8')
+      );
+
+      record(
+        'Customer export',
+        'the button sits beside Bulk import and New customer, gated on BOTH permissions',
+        /Download Excel/.test(page) &&
+          /const canExport = can\(PERMISSIONS\.CUSTOMERS_VIEW\) && can\(PERMISSIONS\.REPORTS_EXPORT\);/.test(page) &&
+          /\{canExport \? \(/.test(page) &&
+          page.indexOf('canExport ?') < page.indexOf('canImport ?'),
+        'same header action group as the existing buttons'
+      );
+
+      record(
+        'Customer export',
+        'it shows a loading state and cannot be fired twice',
+        /const \[exporting, setExporting\] = useState\(false\)/.test(page) &&
+          /if \(exporting\) return;/.test(page) &&
+          /disabled=\{exporting \|\| loading\}/.test(page) &&
+          /spinner-border spinner-border-sm/.test(page) &&
+          /Preparing…/.test(page),
+        'guard, disabled button and spinner'
+      );
+
+      record(
+        'Customer export',
+        'a failure surfaces as a message rather than a silent no-op',
+        /setError\(requestError\.message \|\| 'Unable to download the customer list\.'\)/.test(page) &&
+          /finally \{\s*setExporting\(false\);/.test(page),
+        'error shown, and the button always re-enables'
+      );
+
+      record(
+        'Customer export',
+        'the request carries the CURRENT search and filters, and never page or limit',
+        /exportCustomersExcel\(\{ search: debouncedSearch, \.\.\.filters \}\)/.test(page) &&
+          !/exportCustomersExcel\([^)]*page/.test(page),
+        'what the screen shows is what the file contains'
+      );
+
+      record(
+        'Customer export',
+        'the service goes through the shared client and triggers a browser download',
+        /api\.get\('\/admin\/customers\/export', \{ params: toQuery\(params\), responseType: 'blob' \}\)/.test(service) &&
+          /LMS_Customers_\$\{new Date\(\)\.toISOString\(\)\.slice\(0, 10\)\}\.xlsx/.test(service) &&
+          /function saveBlob/.test(service),
+        'auth header, 401 handling and error normalisation all still apply'
+      );
+
+      record(
+        'Customer export',
+        'the existing customer workflows on the page are untouched',
+        /getCustomers\(\{ page, limit: PAGE_SIZE, search: debouncedSearch, \.\.\.filters \}\)/.test(page) &&
+          /updateCustomerStatus\(customer\.id, nextStatus\)/.test(page) &&
+          /CustomerImportModal/.test(page) &&
+          /CustomerFormModal/.test(page) &&
+          /downloadCustomerImportTemplate/.test(service) &&
+          /runCustomerImport/.test(service),
+        'list, status toggle, create and import all still wired'
+      );
+    }
+
+    record(
+      'Customer export',
+      'the shared workbook renderer still defaults to the report registry when no columns are passed',
+      (() => {
+        const src = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'reportExcelService.js'), 'utf8'));
+        return (
+          /const columns = columnsOverride \?\? CSV_COLUMNS\[reportKey\] \?\? \[\];/.test(src) &&
+          /const title = titleOverride \?\? REPORT_TITLES\[reportKey\] \?\? 'Report';/.test(src) &&
+          /\(summaryFieldsOverride \?\? SUMMARY_FIELDS\[reportKey\] \?\? \[\]\)/.test(src)
+        );
+      })(),
+      'the report exports are unaffected by the override'
+    );
+  }
+
+  // ---------- Loan details: Close Loan / Cancel Loan confirmation ----------
+  {
+    /*
+     * "Close" and "Cancel" read as window controls, and each was a single click
+     * away from a TERMINAL status change. Both now name the loan and both go
+     * through a confirmation dialog.
+     *
+     * The dialog's wording is checked against the backend it describes: neither
+     * action requires repayment, neither is reversible, and neither deletes
+     * anything.
+     */
+    const loanStatusSvc = require('../src/services/loanStatusService');
+    const front = (...p) => path.resolve(__dirname, '..', '..', 'frontend', 'src', ...p);
+    const page = stripComments(fs.readFileSync(front('pages', 'loans', 'LoanDetailsPage.jsx'), 'utf8'));
+    const dialog = stripComments(fs.readFileSync(front('components', 'loans', 'LoanStatusConfirmModal.jsx'), 'utf8'));
+    const loanSvcSrc = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'loanService.js'), 'utf8'));
+
+    /* ----------------------- 1. the labels are explicit ----------------------- */
+
+    record(
+      'Loan actions',
+      '1. the buttons read "Close Loan" and "Cancel Loan", not "Close" and "Cancel"',
+      /CLOSED: \{ label: 'Close Loan'/.test(page) &&
+        /CANCELLED: \{ label: 'Cancel Loan'/.test(page) &&
+        // The old ternary that produced the bare words is gone.
+        !/status === 'CLOSED' \? 'Close' : 'Cancel'/.test(page),
+      'the action names the loan, not the page'
+    );
+
+    record(
+      'Loan actions',
+      'each carries its own icon, so the two are distinguishable without relying on colour',
+      (() => {
+        const close = /CLOSED: \{ label: 'Close Loan', icon: '([\w-]+)', className: '([\w-]+)'/.exec(page);
+        const cancel = /CANCELLED: \{ label: 'Cancel Loan', icon: '([\w-]+)', className: '([\w-]+)'/.exec(page);
+        return (
+          close && cancel &&
+          close[1] !== cancel[1] &&
+          close[2] === 'btn-primary' &&
+          cancel[2] === 'btn-outline-danger' &&
+          /<i className=\{`bi \$\{action\.icon\} me-2`\}/.test(page)
+        );
+      })(),
+      'bi-check2-circle / btn-primary vs bi-x-octagon / btn-outline-danger'
+    );
+
+    record(
+      'Loan actions',
+      'the actions are a labelled group, and Back to loans stays outside it',
+      /role="group" aria-label="Loan actions"/.test(page) &&
+        /Back to loans/.test(page) &&
+        page.indexOf('Back to loans') < page.indexOf('aria-label="Loan actions"') &&
+        /title=\{action\.hint\}/.test(page),
+      'navigation separated from loan management, with a hint on each action'
+    );
+
+    /* ------------------- 2-3. a click opens a dialog, nothing else ------------- */
+
+    record(
+      'Loan actions',
+      '2. clicking either button only opens its dialog — it does not call the API',
+      /const requestTransition = \(status\) => \{[\s\S]{0,260}setPendingTransition\(status\);\s*return;/.test(page) &&
+        /onClick=\{\(\) => requestTransition\(status\)\}/.test(page) &&
+        // The button no longer calls the transition directly.
+        !/onClick=\{\(\) => handleTransition\(status\)\}/.test(page),
+      'the button sets pending state; only the dialog confirms'
+    );
+
+    record(
+      'Loan actions',
+      "3. dismissing the dialog just clears the pending status, so no request is made",
+      /onDismiss=\{\(\) => setPendingTransition\(null\)\}/.test(page) &&
+        (() => {
+          // Nothing in the dismiss path touches the API.
+          const dismissHandlers = dialog.match(/onClick=\{onDismiss\}/g) ?? [];
+          return dismissHandlers.length >= 1 && !/onDismiss[\s\S]{0,80}updateLoanStatus/.test(page);
+        })(),
+      'Keep Loan Open / Keep Loan only close the dialog'
+    );
+
+    record(
+      'Loan actions',
+      'the dialog offers the agreed wording for both variants',
+      /title: 'Close Loan'/.test(dialog) &&
+        /confirmLabel: 'Confirm Close Loan'/.test(dialog) &&
+        /dismissLabel: 'Keep Loan Open'/.test(dialog) &&
+        /title: 'Cancel Loan'/.test(dialog) &&
+        /confirmLabel: 'Confirm Cancel Loan'/.test(dialog) &&
+        /dismissLabel: 'Keep Loan'/.test(dialog),
+      'Close Loan / Keep Loan Open, Cancel Loan / Keep Loan'
+    );
+
+    record(
+      'Loan actions',
+      'the dialog shows loan number, applicant, current status and the financial position',
+      /loan\.loanNumber/.test(dialog) &&
+        /loan\.applicant\?\.customer\?\.fullName/.test(dialog) &&
+        /label="Current status">\{loan\.status\}/.test(dialog) &&
+        /label="Outstanding">\{formatCurrency\(outstanding\)\}/.test(dialog) &&
+        /label="Posted collections"/.test(dialog),
+      'identified before the operator confirms'
+    );
+
+    /* ------------- 4-5. each dialog confirms only its own operation ------------ */
+
+    record(
+      'Loan actions',
+      '4/5. Close and Cancel cannot trigger one another — the dialog confirms the status the button set',
+      /const \[pendingTransition, setPendingTransition\] = useState\(null\)/.test(page) &&
+        /status=\{pendingTransition\}/.test(page) &&
+        /onConfirm=\{handleTransition\}/.test(page) &&
+        // The dialog confirms the status it was given; it does not choose one.
+        /await onConfirm\(status\)/.test(dialog) &&
+        !/onConfirm\('(CLOSED|CANCELLED)'\)/.test(dialog),
+      'one dialog instance, driven by the pending status'
+    );
+
+    record(
+      'Loan actions',
+      'the confirmed status reaches the existing status endpoint unchanged',
+      /await updateLoanStatus\(id, status\)/.test(page) &&
+        /export const updateLoanStatus = \(id, status\) =>\s*api\.patch\(`\/admin\/loans\/\$\{id\}\/status`, \{ status \}\)/.test(
+          stripComments(fs.readFileSync(front('services', 'loanService.js'), 'utf8'))
+        ),
+      'PATCH /admin/loans/:id/status — the existing API, unchanged'
+    );
+
+    /* ------------------- 6-7. duplicate, loading and error states -------------- */
+
+    record(
+      'Loan actions',
+      '6. a second confirm while the request is in flight is ignored',
+      /if \(submitting\) return;/.test(dialog) && /disabled=\{submitting\}/.test(dialog),
+      'guarded in the handler and on the button'
+    );
+
+    record(
+      'Loan actions',
+      '7. the confirm button shows progress text while the request runs',
+      /progress: 'Closing loan…'/.test(dialog) &&
+        /progress: 'Cancelling loan…'/.test(dialog) &&
+        /spinner-border spinner-border-sm/.test(dialog),
+      'spinner plus "Closing loan…" / "Cancelling loan…"'
+    );
+
+    record(
+      'Loan actions',
+      'a failure shows the BACKEND message in the dialog, which stays open',
+      /setError\(requestError\.message \|\| 'The loan could not be updated\.'\)/.test(dialog) &&
+        /setSubmitting\(false\)/.test(dialog) &&
+        // The page rethrows so the dialog can catch it.
+        /throw requestError;/.test(page),
+      "the backend's own eligibility message is shown, not a guess"
+    );
+
+    record(
+      'Loan actions',
+      '11. success is only announced after the request resolves, and the loan is re-read',
+      (() => {
+        const fn = page.slice(page.indexOf('const handleTransition'), page.indexOf('const requestTransition'));
+        const awaitIndex = fn.indexOf('await updateLoanStatus');
+        return (
+          awaitIndex !== -1 &&
+          awaitIndex < fn.indexOf('setNotice(') &&
+          /await load\(\);/.test(fn) &&
+          fn.indexOf('setNotice(') < fn.indexOf('await load();')
+        );
+      })(),
+      'no optimistic success; the badge reflects the server'
+    );
+
+    record(
+      'Loan actions',
+      'focus lands on the SAFE button, and Escape still dismisses',
+      /dismissRef\.current\?\.focus\(\)/.test(dialog) &&
+        /ref=\{dismissRef\}/.test(dialog) &&
+        /event\.key === 'Escape'/.test(stripComments(fs.readFileSync(front('components', 'common', 'Modal.jsx'), 'utf8'))),
+      'a stray Enter keeps the loan as it is'
+    );
+
+    record(
+      'Loan actions',
+      'the dialog cannot be dismissed out from under an in-flight request',
+      /onClose=\{submitting \? \(\) => \{\} : onDismiss\}/.test(dialog),
+      'closing is inert while submitting'
+    );
+
+    /* ---------------- 8-9. backend rules are unchanged and enforced ------------ */
+
+    record(
+      'Loan actions',
+      '8. the status endpoint still enforces its own permission per transition',
+      loanStatusSvc.permissionForTransition('CLOSED') === PERMISSIONS.LOANS_CLOSE &&
+        loanStatusSvc.permissionForTransition('CANCELLED') === PERMISSIONS.LOANS_CANCEL &&
+        /requirePermission/.test(stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'routes', 'loanRoutes.js'), 'utf8'))),
+      'loans.close and loans.cancel, server-side'
+    );
+
+    record(
+      'Loan actions',
+      'the UI only offers a transition the caller actually holds the permission for',
+      /\(ALLOWED_TRANSITIONS\[loan\.status\] \?\? \[\]\)\.filter\(\(status\) => can\(TRANSITION_PERMISSION\[status\]\)\)/.test(page),
+      'and the backend re-checks regardless'
+    );
+
+    record(
+      'Loan actions',
+      '9. the lifecycle is untouched: ACTIVE may close or cancel, and both are terminal',
+      JSON.stringify(loanStatusSvc.ALLOWED_TRANSITIONS.ACTIVE) === '["CLOSED","CANCELLED"]' &&
+        loanStatusSvc.ALLOWED_TRANSITIONS.CLOSED.length === 0 &&
+        loanStatusSvc.ALLOWED_TRANSITIONS.CANCELLED.length === 0 &&
+        Object.keys(loanStatusSvc.ALLOWED_TRANSITIONS).length === 4,
+      'no new status, no new transition'
+    );
+
+    record(
+      'Loan actions',
+      'a terminal loan is still refused with 409, so the dialog cannot talk the backend into it',
+      (() => {
+        const refuse = (from, to) => {
+          try {
+            loanStatusSvc.assertTransitionAllowed(from, to);
+            return null;
+          } catch (e) {
+            return e.statusCode;
+          }
+        };
+        return (
+          refuse('CLOSED', 'ACTIVE') === 409 &&
+          refuse('CANCELLED', 'ACTIVE') === 409 &&
+          refuse('CLOSED', 'CANCELLED') === 409 &&
+          refuse('ACTIVE', 'ACTIVE') === 409
+        );
+      })(),
+      'reopening is impossible'
+    );
+
+    /* -------------- 10. nothing financial is touched by either action ---------- */
+
+    record(
+      'Loan actions',
+      '10. changeStatus writes the status and nothing else — no schedule, collection or allocation is altered',
+      (() => {
+        const fn = loanSvcSrc.slice(loanSvcSrc.indexOf('async function changeStatus'), loanSvcSrc.indexOf('module.exports'));
+        return (
+          /await loan\.update\(\{ status, updatedBy: actor\.id \}, \{ transaction \}\)/.test(fn) &&
+          // Nothing is destroyed, and no collection or allocation is written.
+          !/destroy\(|Collection|CollectionAllocation|allocated_amount/.test(fn) &&
+          // A schedule is only ever GENERATED on activation, never on close/cancel.
+          /if \(status === LOAN_STATUS\.ACTIVE\) \{[\s\S]{0,200}generateSchedule/.test(fn)
+        );
+      })(),
+      'closing and cancelling generate nothing and delete nothing'
+    );
+
+    record(
+      'Loan actions',
+      'the change is audited with the action that matches the transition',
+      loanStatusSvc.auditActionForTransition('CLOSED') === AUDIT_ACTIONS.LOAN_CLOSED &&
+        loanStatusSvc.auditActionForTransition('CANCELLED') === AUDIT_ACTIONS.LOAN_CANCELLED &&
+        /auditService\.record\(/.test(loanSvcSrc),
+      'LOAN_CLOSED / LOAN_CANCELLED, as before'
+    );
+
+    /* ------------- the dialog describes the backend, not a wished-for one ------ */
+
+    record(
+      'Loan actions',
+      'the dialog does NOT claim a repayment requirement, because the backend enforces none',
+      (() => {
+        const fn = loanSvcSrc.slice(loanSvcSrc.indexOf('async function changeStatus'), loanSvcSrc.indexOf('module.exports'));
+        // Proof the backend has no such gate...
+        const backendHasNoGate = !/outstanding|totalCollected|fully repaid|amount_collected/i.test(fn);
+        // ...and the dialog says so rather than implying one.
+        return (
+          backendHasNoGate &&
+          /it does not check that a loan has been repaid/.test(dialog.replace(/\s+/g, ' ')) &&
+          !/must be fully repaid|must be repaid before/i.test(dialog)
+        );
+      })(),
+      'it shows the outstanding balance and warns, instead of inventing a rule'
+    );
+
+    record(
+      'Loan actions',
+      'the dialog states plainly that the action is final and that nothing is deleted',
+      (() => {
+        // JSX wraps prose across lines, so compare on collapsed whitespace.
+        const prose = dialog.replace(/\s+/g, ' ');
+        return (
+          /This cannot be undone/.test(prose) &&
+          /no further collections can be posted against it/.test(prose) &&
+          /Nothing is deleted/.test(prose) &&
+          /retained as financial history/.test(prose)
+        );
+      })(),
+      'matching the terminal lifecycle and the untouched history'
+    );
+
+    record(
+      'Loan actions',
+      'cancelling a loan that has taken money is flagged, since the backend permits it',
+      /status === 'CANCELLED' && collectionCount > 0/.test(dialog) &&
+        /Cancelling is <em>not<\/em> blocked by the system/.test(dialog.replace(/\s+/g, ' ')),
+      'the operator is told before confirming'
+    );
+
+    record(
+      'Loan actions',
+      'the outstanding figure comes from the EXISTING collection summary endpoint, gated by its own permission',
+      /getLoanCollectionSummary/.test(dialog) &&
+        /can\(PERMISSIONS\.COLLECTIONS_VIEW\)/.test(dialog) &&
+        // A failure to read it must not break the dialog.
+        /\.catch\(\(\) => \{[\s\S]{0,80}setSummary\(null\)/.test(dialog),
+      'no new endpoint; degrades to less detail rather than failing'
+    );
+
+    /* -------------------- 12. the rest of the page still works ---------------- */
+
+    record(
+      'Loan actions',
+      '12. loan details, parties, EMI schedule and edit-terms are all still wired',
+      /EmiSummary/.test(page) &&
+        /getEmiSchedule\(id, \{ limit: 1 \}\)/.test(page) &&
+        /PartyList/.test(page) &&
+        /LoanFormModal/.test(page) &&
+        /SwapApplicantModal/.test(page) &&
+        /getLoanParties\(id\)/.test(page) &&
+        /setLoanPartyStatus\(id, party\.id, 'REMOVED'\)/.test(page),
+      'nothing else on the page was rewired'
+    );
+
+    record(
+      'Loan actions',
+      'the read-only notice and the edit gate are unchanged',
+      /EDITABLE_STATUSES\.includes\(loan\.status\) && can\(PERMISSIONS\.LOANS_UPDATE\)/.test(page) &&
+        /its terms are fixed and cannot be edited/.test(page),
+      'existing status messaging preserved'
+    );
+
+    record(
+      'Loan actions',
+      'ACTIVATE is deliberately left as it was — only the two terminal actions gained a dialog',
+      /const CONFIRMED_TRANSITIONS = \['CLOSED', 'CANCELLED'\]/.test(page) &&
+        /ACTIVE: \{ label: 'Activate'/.test(page),
+      'scope limited to the ambiguous, irreversible pair'
     );
   }
 

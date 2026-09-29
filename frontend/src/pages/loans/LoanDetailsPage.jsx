@@ -7,6 +7,7 @@ import LoanFormModal from '../../components/loans/LoanFormModal';
 import PartyList from '../../components/loanParties/PartyList';
 import PartyFormModal from '../../components/loanParties/PartyFormModal';
 import SwapApplicantModal from '../../components/loanParties/SwapApplicantModal';
+import LoanStatusConfirmModal from '../../components/loans/LoanStatusConfirmModal';
 import usePermissions from '../../hooks/usePermissions';
 import { getLoan, updateLoanStatus } from '../../services/loanService';
 import { getLoanParties, setLoanPartyStatus } from '../../services/loanPartyService';
@@ -31,6 +32,23 @@ const TRANSITION_PERMISSION = {
   CLOSED: PERMISSIONS.LOANS_CLOSE,
   CANCELLED: PERMISSIONS.LOANS_CANCEL
 };
+
+/*
+ * The action names the loan, not the page. "Close" and "Cancel" alone read as
+ * window controls, and both were previously a single click away from changing a
+ * loan's status for good.
+ *
+ * The icon is not decoration: it is the second, non-colour signal separating a
+ * routine close from a destructive cancel.
+ */
+const TRANSITION_ACTION = {
+  ACTIVE: { label: 'Activate', icon: 'bi-play-circle', className: 'btn-primary', hint: 'Activate this loan and generate its EMI schedule' },
+  CLOSED: { label: 'Close Loan', icon: 'bi-check2-circle', className: 'btn-primary', hint: 'Mark this loan closed — final, and it stops further collections' },
+  CANCELLED: { label: 'Cancel Loan', icon: 'bi-x-octagon', className: 'btn-outline-danger', hint: 'Cancel this loan — final, and it stops further collections' }
+};
+
+/** Status changes serious enough to require an explicit confirmation. */
+const CONFIRMED_TRANSITIONS = ['CLOSED', 'CANCELLED'];
 
 function Row({ label, children }) {
   return (
@@ -60,6 +78,10 @@ export default function LoanDetailsPage() {
   const [swapOpen, setSwapOpen] = useState(false);
   // `null` closed; otherwise the party being edited, or 'add' for a new one.
   const [partyForm, setPartyForm] = useState(null);
+  // The status awaiting confirmation, or null when no dialog is open. Holding
+  // the target status here is what keeps Close and Cancel from ever being able
+  // to trigger one another.
+  const [pendingTransition, setPendingTransition] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -93,18 +115,40 @@ export default function LoanDetailsPage() {
     load();
   }, [load]);
 
+  /*
+   * Performs the status change. Confirmed transitions are called by the dialog,
+   * which keeps itself open and shows the backend's own message if this throws
+   * — the loan may no longer be eligible, and that is the backend's call to
+   * make, not something the page should guess at.
+   *
+   * The success notice is only shown once the request has resolved, and the
+   * loan is then re-read so the badge and available actions reflect the server.
+   */
   const handleTransition = async (status) => {
     setBusy(true);
     setError('');
     try {
       await updateLoanStatus(id, status);
+      setPendingTransition(null);
       setNotice(`Loan ${status.toLowerCase()}.`);
       await load();
     } catch (requestError) {
-      setError(requestError.message);
+      // Unconfirmed transitions have no dialog to display the error, so those
+      // fall back to the page-level alert.
+      if (!CONFIRMED_TRANSITIONS.includes(status)) setError(requestError.message);
+      throw requestError;
     } finally {
       setBusy(false);
     }
+  };
+
+  /** A confirmed transition opens its dialog; anything else runs as before. */
+  const requestTransition = (status) => {
+    if (CONFIRMED_TRANSITIONS.includes(status)) {
+      setPendingTransition(status);
+      return;
+    }
+    handleTransition(status).catch(() => {});
   };
 
   const handleRemoveParty = async (party) => {
@@ -148,24 +192,29 @@ export default function LoanDetailsPage() {
                 <h1 className="h3 fw-bold mb-0">{formatCurrency(loan.loanAmount)}</h1>
               </div>
 
-              <div className="d-flex flex-wrap gap-2">
+              <div className="d-flex flex-wrap gap-2" role="group" aria-label="Loan actions">
                 {editable ? (
                   <button type="button" className="btn btn-outline-primary" onClick={() => setEditOpen(true)}>
                     <i className="bi bi-pencil me-2" aria-hidden="true" />
                     Edit terms
                   </button>
                 ) : null}
-                {transitions.map((status) => (
-                  <button
-                    key={status}
-                    type="button"
-                    className={`btn ${status === 'CANCELLED' ? 'btn-outline-danger' : 'btn-primary'}`}
-                    onClick={() => handleTransition(status)}
-                    disabled={busy}
-                  >
-                    {status === 'ACTIVE' ? 'Activate' : status === 'CLOSED' ? 'Close' : 'Cancel'}
-                  </button>
-                ))}
+                {transitions.map((status) => {
+                  const action = TRANSITION_ACTION[status];
+                  return (
+                    <button
+                      key={status}
+                      type="button"
+                      className={`btn ${action.className}`}
+                      onClick={() => requestTransition(status)}
+                      disabled={busy}
+                      title={action.hint}
+                    >
+                      <i className={`bi ${action.icon} me-2`} aria-hidden="true" />
+                      {action.label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
             {!editable && loan.status !== 'DRAFT' ? (
@@ -289,6 +338,19 @@ export default function LoanDetailsPage() {
               </dl>
             </div>
           </div>
+
+          {/*
+            * One dialog instance, driven by which status is pending. Close and
+            * Cancel therefore cannot be confirmed into one another: the status
+            * the dialog confirms is the status the button set.
+            */}
+          <LoanStatusConfirmModal
+            open={Boolean(pendingTransition)}
+            status={pendingTransition}
+            loan={loan}
+            onDismiss={() => setPendingTransition(null)}
+            onConfirm={handleTransition}
+          />
 
           <LoanFormModal
             open={editOpen}

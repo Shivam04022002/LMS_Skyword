@@ -97,9 +97,26 @@ function describeFilters(filters = {}) {
 /**
  * Builds the workbook: one sheet of rows, one sheet of totals and filters.
  */
-async function buildReportWorkbook({ reportKey, rows = [], summary = {}, filters = {}, generatedAt = new Date() }) {
-  const columns = CSV_COLUMNS[reportKey] ?? [];
-  const title = REPORT_TITLES[reportKey] ?? 'Report';
+async function buildReportWorkbook({
+  reportKey,
+  rows = [],
+  summary = {},
+  filters = {},
+  generatedAt = new Date(),
+  columns: columnsOverride,
+  title: titleOverride,
+  summaryFields: summaryFieldsOverride
+}) {
+  /*
+   * Columns, title and summary fields normally come from the report registry,
+   * looked up by `reportKey`. A caller that is NOT a registered report — the
+   * customer export is the only one — passes its own instead, so that it reuses
+   * this renderer rather than growing a second one, without having to appear in
+   * REPORTS and pick up a /admin/reports route it should not have. Omitted,
+   * every lookup is exactly as it was.
+   */
+  const columns = columnsOverride ?? CSV_COLUMNS[reportKey] ?? [];
+  const title = titleOverride ?? REPORT_TITLES[reportKey] ?? 'Report';
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'LMS';
@@ -148,7 +165,7 @@ async function buildReportWorkbook({ reportKey, rows = [], summary = {}, filters
   totalsHeading.fill = HEADER_FILL;
   totalsHeading.font = HEADER_FONT;
 
-  (SUMMARY_FIELDS[reportKey] ?? []).forEach((field) => {
+  (summaryFieldsOverride ?? SUMMARY_FIELDS[reportKey] ?? []).forEach((field) => {
     const { value, numFmt } = cellFor(valueAt(summary, field.path), field.type);
     const row = summarySheet.addRow([field.label, value]);
     if (numFmt) row.getCell(2).numFmt = numFmt;

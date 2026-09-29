@@ -53,11 +53,32 @@ export const runCustomerImport = (file) => api.post('/admin/customers/import', s
 /** Downloads the blank template workbook. */
 export async function downloadCustomerImportTemplate() {
   const blob = await api.get('/admin/customers/import/template', { responseType: 'blob' });
+  saveBlob(blob, 'lms-customer-import-template.xlsx');
+}
 
+/**
+ * Downloads the customer list as a workbook.
+ *
+ * The SAME filters the screen is showing are sent, and the backend exports
+ * every matching customer rather than the page on screen — so the file cannot
+ * disagree with the list, and paging is not silently applied to it. `page` and
+ * `limit` are deliberately not passed.
+ *
+ * Goes through the shared Axios client so the auth header, the 401 handler and
+ * error normalisation all still apply; a plain anchor href could not carry the
+ * token.
+ */
+export async function exportCustomersExcel(params = {}) {
+  const blob = await api.get('/admin/customers/export', { params: toQuery(params), responseType: 'blob' });
+  saveBlob(blob, `LMS_Customers_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+/** Hands a downloaded blob to the browser under the given filename. */
+function saveBlob(blob, filename) {
   const url = window.URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'lms-customer-import-template.xlsx';
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();

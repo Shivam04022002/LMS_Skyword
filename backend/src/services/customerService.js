@@ -4,7 +4,8 @@ const { Op } = require('sequelize');
 const { sequelize, Customer, CifSequence } = require('../models');
 const ApiError = require('../utils/ApiError');
 const auditService = require('./auditService');
-const { CIF_SEQUENCE_NAME, formatCifId, CUSTOMER_STATUS } = require('../config/customers');
+const { CIF_SEQUENCE_NAME, formatCifId, CUSTOMER_STATUS, CUSTOMER_EXPORT_ATTRIBUTES } = require('../config/customers');
+const { EXPORT_MAX_ROWS } = require('../config/reports');
 const { AUDIT_ACTIONS, AUDIT_ENTITIES } = require('../config/auditActions');
 
 const SORTABLE_FIELDS = ['fullName', 'cifId', 'city', 'state', 'status', 'createdAt', 'updatedAt'];
@@ -86,14 +87,13 @@ async function findCustomerOrFail(customerId) {
 }
 
 /**
- * GET /api/admin/customers
- * Search covers CIFID, full name, mobile and email; filtering and paging are
- * done in SQL, never in the client.
+ * The WHERE and ORDER BY a set of list filters describes.
+ *
+ * Shared by the on-screen list and the Excel export so the two cannot drift:
+ * a download is exactly the rows the screen would show, unpaged. Every filter
+ * is applied in SQL, never in the client.
  */
-async function listCustomers({ page = 1, limit = DEFAULT_LIMIT, search, status, city, state, gender, sortBy = 'createdAt', sortOrder = 'DESC' } = {}) {
-  const currentPage = Math.max(1, Number(page) || 1);
-  const pageSize = Math.min(MAX_LIMIT, Math.max(1, Number(limit) || DEFAULT_LIMIT));
-
+function buildCustomerQuery({ search, status, city, state, gender, sortBy = 'createdAt', sortOrder = 'DESC' } = {}) {
   const where = {};
 
   if (search && String(search).trim()) {
@@ -125,10 +125,24 @@ async function listCustomers({ page = 1, limit = DEFAULT_LIMIT, search, status, 
   const field = SORTABLE_FIELDS.includes(sortBy) ? sortBy : 'createdAt';
   const direction = String(sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
+  return { where, order: [[field, direction]] };
+}
+
+/**
+ * GET /api/admin/customers
+ * Search covers CIFID, full name, mobile and email; filtering and paging are
+ * done in SQL, never in the client.
+ */
+async function listCustomers({ page = 1, limit = DEFAULT_LIMIT, ...filters } = {}) {
+  const currentPage = Math.max(1, Number(page) || 1);
+  const pageSize = Math.min(MAX_LIMIT, Math.max(1, Number(limit) || DEFAULT_LIMIT));
+
+  const { where, order } = buildCustomerQuery(filters);
+
   const { rows, count } = await Customer.findAndCountAll({
     where,
     include: AUDIT_INCLUDE,
-    order: [[field, direction]],
+    order,
     limit: pageSize,
     offset: (currentPage - 1) * pageSize,
     distinct: true
@@ -143,6 +157,51 @@ async function listCustomers({ page = 1, limit = DEFAULT_LIMIT, search, status, 
       totalPages: Math.ceil(count / pageSize) || 0
     }
   };
+}
+
+/**
+ * GET /api/admin/customers/export
+ *
+ * Every customer matching the CURRENT search and filters — not the page on
+ * screen. The same `buildCustomerQuery` the list uses decides which rows those
+ * are, so a download can never disagree with what the operator was looking at.
+ *
+ * Only the exported columns are selected, so the query reads no field the file
+ * will not contain, and none of the audit joins the list view needs.
+ *
+ * Refused rather than truncated above EXPORT_MAX_ROWS: the same rule the report
+ * exports apply, because a silently shortened file is worse than none.
+ */
+async function exportCustomers(filters = {}) {
+  const { where, order } = buildCustomerQuery(filters);
+
+  const total = await Customer.count({ where });
+  if (total > EXPORT_MAX_ROWS) {
+    throw ApiError.badRequest(
+      `This export would contain ${total} customers, above the ${EXPORT_MAX_ROWS} row limit. Narrow the search or filters and try again.`
+    );
+  }
+
+  const rows = await Customer.findAll({
+    where,
+    order,
+    attributes: [...CUSTOMER_EXPORT_ATTRIBUTES],
+    raw: true
+  });
+
+  /*
+   * `created_at` is a timestamp, so Sequelize hands back a Date object, and the
+   * workbook renderer only recognises a date from an ISO string — a raw Date
+   * would land in the cell as "Tue Aug 25 2026 15:30:46 GMT+0530". Converting
+   * here gives it the ISO form it expects, and the cell becomes a real date.
+   * `date_of_birth` is a DATEONLY and already arrives as YYYY-MM-DD.
+   */
+  const customers = rows.map((row) => ({
+    ...row,
+    createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt
+  }));
+
+  return { customers, total };
 }
 
 async function getCustomerById(customerId) {
@@ -259,6 +318,8 @@ async function changeStatus(customerId, status, actor, context) {
 module.exports = {
   createCustomerRecord,
   listCustomers,
+  buildCustomerQuery,
+  exportCustomers,
   getCustomerById,
   createCustomer,
   updateCustomer,
