@@ -36,6 +36,22 @@ const STATUS_LABEL = {
   DUPLICATE: 'Already posted'
 };
 
+/*
+ * An advance payment, in the operator's terms: how much of this row lands on
+ * instalments that are not due yet. The backend flags each allocation, so this
+ * only counts and totals them — it never decides what is an advance, and it
+ * never re-derives an amount.
+ */
+function advanceSummary(row) {
+  const future = (row.dateGroups ?? []).flatMap((group) => group.allocations.filter((allocation) => allocation.future));
+  if (future.length === 0) return null;
+
+  return {
+    count: future.length,
+    amount: future.reduce((total, allocation) => total + Number(allocation.amount), 0).toFixed(2)
+  };
+}
+
 export default function OneBulkImport() {
   const inputRef = useRef(null);
 
@@ -154,8 +170,10 @@ export default function OneBulkImport() {
               <div className="form-text">
                 Loan Number, Payer CIFID, Amount, Collection Date (optional), Payment Mode, Reference, Notes.
                 Allocation is decided by the system — a file naming an allocation, EMI or balance column is refused.
-                Leave Collection Date blank to have the system date each payment from the instalment(s) it settles;
-                a payment spanning instalments due on different dates then becomes one collection per date.
+                Collection Date is the date the customer actually paid — leave it blank and today's date is used. It
+                is never taken from an instalment's due date, so a payment covering instalments that are not due yet
+                is accepted: it is dated when it was received and allocated across them, oldest first. Backfilling
+                payments received earlier? Fill Collection Date in on every row, or they will all be dated today.
               </div>
             </div>
             {result ? (
@@ -217,8 +235,8 @@ export default function OneBulkImport() {
           <div className="card-body">
             <h2 className="h6 fw-bold">Posted collections</h2>
             <p className="form-text mt-0">
-              One Excel row can produce more than one collection when its Collection Date was left blank and the
-              amount spanned instalments due on different dates — each row is shown for every collection it produced.
+              One Excel row posts one collection, on the date the payment was received, with its amount allocated
+              across every instalment it reaches — including instalments that were not yet due.
             </p>
             <div className="table-responsive" style={{ maxHeight: '18rem' }}>
               <table className="table table-sm align-middle mb-0">
@@ -238,8 +256,8 @@ export default function OneBulkImport() {
                       <td className="font-monospace">{collection.collectionNumber}</td>
                       <td>
                         {collection.collectionDate}
-                        {collection.dateSource === 'AUTO_EMI_DATE' ? (
-                          <span className="text-secondary small"> (EMI date, auto)</span>
+                        {collection.dateSource === 'SYSTEM_DATE' ? (
+                          <span className="text-secondary small"> (today — no date given)</span>
                         ) : null}
                       </td>
                       <td className="text-end fw-semibold">{formatCurrency(collection.amount)}</td>
@@ -292,34 +310,56 @@ export default function OneBulkImport() {
                         )}
                       </td>
                       <td>
-                        {row.values.collectionDate ? (
-                          row.values.collectionDate
+                        {/*
+                          The date the payment will be recorded on. With a blank
+                          Collection Date the backend resolves it to today and
+                          reports it here; instalment due dates sit beside the
+                          allocations, where they belong.
+                        */}
+                        {row.dateGroups?.length ? (
+                          <>
+                            {row.dateGroups[0].date}
+                            {row.dateGroups[0].source === 'SYSTEM_DATE' ? (
+                              <span className="d-block text-secondary small">today — no date given</span>
+                            ) : null}
+                          </>
                         ) : (
-                          <span className="badge text-bg-info-subtle text-info-emphasis" title="Derived from the instalment date(s) this payment settles">
-                            AUTO — EMI DATE
-                          </span>
+                          row.values.collectionDate ?? <span className="text-secondary">today</span>
                         )}
                       </td>
                       <td className="text-end">{row.values.amount ? formatCurrency(row.values.amount) : '—'}</td>
                       <td>{row.values.ledgerType ?? '—'}</td>
                       <td className="small">
                         {row.dateGroups?.length ? (
-                          row.dateGroups.map((group) => (
-                            <div key={`${row.rowNumber}-${group.date}`} className="mb-1">
-                              <div className="fw-semibold">
-                                {group.date}
-                                {group.source === 'AUTO_EMI_DATE' ? (
-                                  <span className="text-secondary fw-normal"> (EMI date, auto)</span>
-                                ) : null}{' '}
-                                → {formatCurrency(group.amount)}
+                          row.dateGroups.map((group) => {
+                            const advance = advanceSummary(row);
+                            return (
+                              <div key={`${row.rowNumber}-${group.date}`} className="mb-1">
+                                <div className="fw-semibold">{formatCurrency(group.amount)} in total</div>
+                                {group.allocations.map((allocation) => (
+                                  <div key={`${row.rowNumber}-${group.date}-${allocation.emiId}`} className="text-secondary ps-2">
+                                    EMI #{allocation.emiNumber} → {formatCurrency(allocation.amount)}
+                                    <span className="ms-1">
+                                      · due {allocation.emiDate}
+                                      {allocation.future ? <span className="fst-italic"> (not yet due)</span> : null}
+                                    </span>
+                                    <span className="ms-1">
+                                      ·{' '}
+                                      {Number(allocation.outstandingAfter) === 0
+                                        ? 'fully paid'
+                                        : `${formatCurrency(allocation.outstandingAfter)} still owing`}
+                                    </span>
+                                  </div>
+                                ))}
+                                {advance ? (
+                                  <div className="badge text-bg-info-subtle text-info-emphasis text-wrap mt-1">
+                                    Advance payment: {formatCurrency(advance.amount)} → {advance.count} future EMI
+                                    {advance.count === 1 ? '' : 's'}
+                                  </div>
+                                ) : null}
                               </div>
-                              {group.allocations.map((allocation) => (
-                                <div key={`${row.rowNumber}-${group.date}-${allocation.emiId}`} className="text-secondary ps-2">
-                                  EMI #{allocation.emiNumber} → {formatCurrency(allocation.amount)}
-                                </div>
-                              ))}
-                            </div>
-                          ))
+                            );
+                          })
                         ) : row.allocation?.length ? (
                           row.allocation.map((allocation) => (
                             <div key={`${row.rowNumber}-${allocation.emiId}`}>

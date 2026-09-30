@@ -15,21 +15,31 @@
  * duplicate it.
  *
  * ── COLLECTION DATE IS OPTIONAL, HERE ONLY ────────────────────────────────────
- * `Collection.collectionDate` is a single, required, non-null column — one
- * collection cannot itself represent more than one date (confirmed against the
- * model: `CollectionAllocation` carries no date of its own, and
- * `collectionAllocationService.derivePaymentDate` stamps an instalment's paid
- * date from its allocations' `Collection.collectionDate`). So when an operator
- * leaves Collection Date blank, a single Excel row that spans instalments due
- * on different dates is split into one collection PER DISTINCT instalment
- * date — never one collection carrying a date that does not apply to some of
- * what it paid. The FIFO plan itself is computed exactly as it always is;
- * splitting by date only changes how that same plan is written down, so it
- * cannot change which instalment absorbs which rupee.
+ * The Collection Date is the date the customer actually handed over the money.
+ * When the operator leaves it blank the row is dated with the SYSTEM date —
+ * today — because that is when an undated payment was received. It is never
+ * derived from an instalment's due date: the instalments a payment settles say
+ * nothing about when it was paid, and a customer paying three weeks ahead is
+ * paying today.
  *
- * An explicit Collection Date always wins outright and reproduces the
- * pre-existing single-collection behaviour byte for byte — grouping by date
- * merely collapses to one group in that case.
+ * One collection therefore covers the whole row, with allocations across every
+ * instalment it reaches, including instalments not yet due. Advance payments
+ * are the point: `planFifoAllocation` has never filtered by date, so the plan
+ * itself needed no change — only the date the resulting collection carries.
+ *
+ * An explicit Collection Date always wins outright and is validated by
+ * `collectionService.assertCollectionDate` exactly as a manually posted
+ * collection is, so a genuinely future payment date is still refused. A blank
+ * date resolves to today and so can never fail that check.
+ *
+ * ── CONSEQUENCE FOR HISTORICAL BACKFILL, READ THIS ────────────────────────────
+ * A BACKFILL MUST NOW GIVE AN EXPLICIT COLLECTION DATE ON EVERY ROW. Blanks in
+ * a historical file will all be dated today, which is wrong for money received
+ * months ago. This is a deliberate trade: dating a blank row from the
+ * instalment it paid made advance payments — the far more common real case —
+ * impossible to record at all, and it silently invented a payment date the
+ * customer never transacted on. The date is now either stated or today, and
+ * never guessed. Do not restore the derived-date behaviour.
  *
  * Isolation: nothing in `collectionService.js`, `collectionImportService.js`,
  * `collectionAllocationService.js` or `collectionValidator.js` imports from
@@ -48,7 +58,7 @@ const collectionService = require('./collectionService');
 const allocationService = require('./collectionAllocationService');
 const collectionValidator = require('../validators/collectionValidator');
 const { toPaise, fromPaise } = require('../utils/money');
-const { today } = require('../utils/dates');
+const { today, differenceInDays } = require('../utils/dates');
 const { AUDIT_ACTIONS, AUDIT_ENTITIES } = require('../config/auditActions');
 const { isValidCifId } = require('../config/customers');
 const { LOAN_STATUS } = require('../config/loans');
@@ -65,7 +75,7 @@ const {
   ROW_STATUS
 } = require('../config/oneBulk');
 
-const DATE_SOURCE = Object.freeze({ EXPLICIT: 'EXPLICIT', AUTO_EMI_DATE: 'AUTO_EMI_DATE' });
+const DATE_SOURCE = Object.freeze({ EXPLICIT: 'EXPLICIT', SYSTEM_DATE: 'SYSTEM_DATE' });
 
 async function parseWorkbook(buffer, { filename } = {}) {
   return spreadsheet.parseWorkbook(buffer, {
@@ -82,7 +92,7 @@ async function parseWorkbook(buffer, { filename } = {}) {
  * Runs the real post-collection field rules against one row's payload.
  *
  * `collectionDate` is the one field oneBulk treats differently: a blank value
- * means "derive it from the instalment(s) this pays", not an error, so the
+ * means "the customer paid today", not an error, so the
  * shared rule's "required" complaint is dropped for exactly that case. Every
  * other rule from the same chain — amount, ledger type, an actually-supplied
  * date's format — is unweakened, and a malformed (non-blank) date still fails
@@ -181,10 +191,9 @@ function toCollectionPayload(values, { loan, payer }) {
  * A row with a blank date carries no date to compare — such rows (and any row
  * paired against one) keep their file position relative to one another,
  * exactly like same-date rows already do. This is deliberately conservative:
- * nothing here guesses at an order the file did not state, and the eventual
- * per-instalment date each blank row resolves to is derived independently,
- * after allocation, from instalments already fixed at schedule generation —
- * it does not depend on, and cannot be skewed by, this processing order.
+ * nothing here guesses at an order the file did not state. A blank row resolves
+ * to today whatever position it ends up in, so this order cannot skew its date —
+ * only which instalments are still outstanding by the time it is applied.
  */
 function orderChronologically(rows) {
   return [...rows].sort((a, b) => {
@@ -200,39 +209,67 @@ function orderChronologically(rows) {
   });
 }
 
-/** All instalment dates for a loan, keyed by EMI id — fetched once per loan, not per row. */
-async function emiDatesByLoan(loanId, { transaction } = {}) {
-  const emis = await EmiSchedule.findAll({ where: { loanId }, attributes: ['id', 'emiDate'], transaction });
-  return new Map(emis.map((emi) => [emi.id, emi.emiDate]));
-}
-
 /**
- * Splits a FIFO allocation plan into the collection(s) it must be written as.
+ * The collection(s) a FIFO allocation plan must be written as.
  *
- * An explicit date collapses everything into a single group — the exact
- * pre-existing behaviour. A blank date groups plan entries by the instalment
- * date each one actually applies to (never today, never the upload date,
- * never the last instalment's date applied to the whole amount), sorted
- * oldest first so the resulting collections read as a coherent history.
+ * ONE collection, always — the whole payment, on the date it was received.
+ *
+ * The collection date is when the customer PAID. It is never taken from an
+ * instalment: an EMI date says when money was due, not when it arrived, and
+ * the two are different facts. A blank Collection Date therefore means "paid
+ * today" and resolves to the system date, not to the date of whichever
+ * instalment the money happens to settle.
+ *
+ * This previously split a blank-dated row into one collection per instalment
+ * date, stamping each with its EMI's due date. That made an advance payment
+ * impossible to record: paying three upcoming instalments produced three
+ * collections dated in the future, and `assertCollectionDate` rejected the
+ * row — the customer had genuinely paid today, but the import insisted the
+ * payment happened on dates that had not arrived yet.
+ *
+ * Allocation is unchanged and still comes from `planFifoAllocation`: one
+ * collection now simply carries allocations across every instalment the
+ * payment reaches, including future-dated ones.
  */
-function groupAllocationByDate({ plan, explicitDate, emiDates }) {
-  if (explicitDate) {
-    return [{ date: explicitDate, source: DATE_SOURCE.EXPLICIT, entries: plan }];
-  }
-
-  const byDate = new Map();
-  for (const entry of plan) {
-    const date = emiDates.get(entry.emiId);
-    if (!byDate.has(date)) byDate.set(date, []);
-    byDate.get(date).push(entry);
-  }
-
-  return [...byDate.entries()]
-    .sort(([dateA], [dateB]) => (dateA < dateB ? -1 : dateA > dateB ? 1 : 0))
-    .map(([date, entries]) => ({ date, source: DATE_SOURCE.AUTO_EMI_DATE, entries }));
+function groupAllocationByDate({ plan, explicitDate, fallbackDate }) {
+  return explicitDate
+    ? [{ date: explicitDate, source: DATE_SOURCE.EXPLICIT, entries: plan }]
+    : [{ date: fallbackDate, source: DATE_SOURCE.SYSTEM_DATE, entries: plan }];
 }
 
 const groupAmount = (entries) => fromPaise(entries.reduce((total, entry) => total + toPaise(entry.amount), 0n));
+
+/**
+ * PREVIEW DETAIL ONLY: what each planned allocation means in the operator's
+ * terms — the instalment's due date, whether it is still to fall due, and what
+ * that instalment will still owe afterwards.
+ *
+ * It decides nothing. `planFifoAllocation` remains the single authority on
+ * which rupee lands where, and this only annotates the plan it produced, which
+ * is why it lives here rather than in the shared planner: the permanent
+ * collection import renders that planner's payload too, and its preview is not
+ * changing.
+ *
+ * `future` is measured against the PAYMENT date, not against the due date of
+ * anything else — an instalment not yet due when the money arrived is exactly
+ * the advance payment this import exists to accept.
+ */
+function describeAllocation({ plan, emisById, collectedPaise, consumed, asOf }) {
+  return plan.map((entry) => {
+    const emi = emisById.get(Number(entry.emiId));
+    const already = (collectedPaise.get(Number(entry.emiId)) ?? 0n) + (consumed.get(entry.emiId) ?? 0n);
+    const outstandingBefore = allocationService.outstandingPaise(emi, already);
+
+    return {
+      emiId: entry.emiId,
+      emiNumber: entry.emiNumber,
+      amount: entry.amount,
+      emiDate: emi.emiDate,
+      future: differenceInDays(emi.emiDate, asOf) < 0,
+      outstandingAfter: fromPaise(outstandingBefore - toPaise(entry.amount))
+    };
+  });
+}
 
 /** What makes two collections the same payment, for duplicate detection — per date-group, not per row. */
 const groupSignature = (loanId, date, amount, paymentReference) =>
@@ -243,12 +280,32 @@ const groupSignature = (loanId, date, amount, paymentReference) =>
  *
  * Nothing here writes. Duplicate protection reuses the existing collection
  * schema's own identity signal — loan, date, amount and reference — the same
- * one the permanent import uses, rather than inventing a new one; for a row
- * whose date was derived, that signal is checked once per resulting
- * collection, since that is what will actually be compared against the ledger
- * at commit time.
+ * one the permanent import uses, rather than inventing a new one — checked
+ * against the date the row actually resolves to, since that is what will be
+ * compared against the ledger at commit time.
  */
 async function evaluateRows(rows, { asOf = today() } = {}) {
+  /*
+   * Instalments and their ledger balances, once per loan. Nothing in this
+   * function writes, so what the ledger says cannot change underneath it; the
+   * rows already walked are accounted for by `consumed` instead.
+   */
+  const emiDetailCache = new Map();
+  async function loanEmiDetail(loanId) {
+    if (!emiDetailCache.has(loanId)) {
+      const emis = await EmiSchedule.findAll({
+        where: { loanId },
+        attributes: ['id', 'emiNumber', 'emiDate', 'emiAmount'],
+        order: [['emiNumber', 'ASC']]
+      });
+      emiDetailCache.set(loanId, {
+        emisById: new Map(emis.map((emi) => [emi.id, emi])),
+        collectedPaise: await allocationService.calculateCollectedByEmi(emis.map((emi) => emi.id))
+      });
+    }
+    return emiDetailCache.get(loanId);
+  }
+
   const resolved = [];
   for (const row of rows) {
     const { errors, loan, payer } = await resolveRow(row.values);
@@ -261,7 +318,6 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
   const seen = new Map(); // group signature -> "row N"
   // emiId -> paise already taken by earlier (chronologically) rows in this file.
   const consumed = new Map();
-  const loanEmiDatesCache = new Map(); // loanId -> Map(emiId -> emiDate)
 
   for (const row of ordered) {
     const errors = [...row.resolveErrors];
@@ -309,34 +365,38 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
       } else {
         allocation = plan;
 
-        let emiDates = null;
-        if (!payload.collectionDate) {
-          if (!loanEmiDatesCache.has(payload.loanId)) {
-            loanEmiDatesCache.set(payload.loanId, await emiDatesByLoan(payload.loanId));
-          }
-          emiDates = loanEmiDatesCache.get(payload.loanId);
-        }
+        // Blank means "paid today"; an explicit date is the date given.
+        const groups = groupAllocationByDate({
+          plan,
+          explicitDate: payload.collectionDate,
+          fallbackDate: asOf
+        });
 
-        const groups = groupAllocationByDate({ plan, explicitDate: payload.collectionDate, emiDates });
-
-        // Each resulting collection's own date must still obey the same rule
-        // an explicit one always has: no advance collections.
+        /*
+         * The same rule an explicit date has always obeyed: no advance
+         * collections. A blank date resolves to today and so always passes —
+         * only a date the operator actually typed can fail here now. The
+         * INSTALMENT dates this payment settles are not checked at all: an
+         * advance payment for future instalments is exactly the case this
+         * import has to support.
+         */
         for (const group of groups) {
           try {
             collectionService.assertCollectionDate(group.date, asOf);
           } catch (error) {
-            errors.push({
-              field: 'collectionDate',
-              reason:
-                group.source === DATE_SOURCE.AUTO_EMI_DATE
-                  ? `Instalment date ${group.date} (derived, no Collection Date was given) — ${error.message}`
-                  : error.message
-            });
+            errors.push({ field: 'collectionDate', reason: error.message });
           }
         }
 
         if (errors.length === 0) {
-          dateGroups = groups;
+          // Annotated for display before `consumed` moves on, so each row's
+          // "still owing" figure reflects the rows above it and not itself.
+          const { emisById, collectedPaise } = await loanEmiDetail(payload.loanId);
+          dateGroups = groups.map((group) => ({
+            ...group,
+            entries: describeAllocation({ plan: group.entries, emisById, collectedPaise, consumed, asOf })
+          }));
+
           plan.forEach((entry) => {
             consumed.set(entry.emiId, (consumed.get(entry.emiId) ?? 0n) + toPaise(entry.amount));
           });
@@ -389,15 +449,22 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
       payload,
       allocation,
       // Present only for a valid row: how it will actually be written — one
-      // entry per collection that will be created. `source` tells the UI
-      // whether to label a date "(explicit)" or "(EMI date, auto)".
+      // entry per collection that will be created — one, always. `source` tells
+      // the UI whether to label the date "(explicit)" or "(today)".
       dateGroups:
         errors.length === 0 && dateGroups
           ? dateGroups.map((group) => ({
               date: group.date,
               source: group.source,
               amount: groupAmount(group.entries),
-              allocations: group.entries.map((entry) => ({ emiId: entry.emiId, emiNumber: entry.emiNumber, amount: entry.amount }))
+              allocations: group.entries.map((entry) => ({
+                emiId: entry.emiId,
+                emiNumber: entry.emiNumber,
+                amount: entry.amount,
+                emiDate: entry.emiDate,
+                future: entry.future,
+                outstandingAfter: entry.outstandingAfter
+              }))
             }))
           : null,
       errors
@@ -445,14 +512,12 @@ async function previewImport(buffer, { filename, asOf = today() } = {}) {
  *
  * Re-parsed and re-validated from scratch — nothing from a previous preview is
  * trusted. Rows are posted in the same chronological-per-loan order the
- * preview planned against, inside ONE transaction. A row whose date was
- * derived writes one collection per instalment date it actually touches, each
- * through `collectionService.createCollectionRecord` — the same function a
- * manual posting and the permanent import both use — so the eligibility
- * rules, the allocation validation, the collection numbering and the EMI
- * snapshot rebuild cannot drift from either of them, and a failure on any one
- * of a row's resulting collections rolls back everything this import has
- * written so far, not just that row.
+ * preview planned against, inside ONE transaction. Each row writes a single
+ * collection through `collectionService.createCollectionRecord` — the same
+ * function a manual posting and the permanent import both use — so the
+ * eligibility rules, the allocation validation, the collection numbering and
+ * the EMI snapshot rebuild cannot drift from either of them, and a failure on
+ * any one row rolls back everything this import has written so far.
  */
 async function runImport(buffer, actor, context, { filename, asOf = today() } = {}) {
   const parsed = await parseWorkbook(buffer, { filename });
@@ -477,7 +542,6 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
 
   const created = await sequelize.transaction(async (transaction) => {
     const collections = [];
-    const loanEmiDatesCache = new Map();
 
     for (const orderedRow of ordered) {
       const row = byRowNumber.get(orderedRow.rowNumber);
@@ -496,15 +560,11 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
         );
       }
 
-      let emiDates = null;
-      if (!row.payload.collectionDate) {
-        if (!loanEmiDatesCache.has(row.payload.loanId)) {
-          loanEmiDatesCache.set(row.payload.loanId, await emiDatesByLoan(row.payload.loanId, { transaction }));
-        }
-        emiDates = loanEmiDatesCache.get(row.payload.loanId);
-      }
-
-      const groups = groupAllocationByDate({ plan, explicitDate: row.payload.collectionDate, emiDates });
+      const groups = groupAllocationByDate({
+        plan,
+        explicitDate: row.payload.collectionDate,
+        fallbackDate: asOf
+      });
 
       for (const group of groups) {
         collectionService.assertCollectionDate(group.date, asOf);
@@ -548,7 +608,7 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
   const fullyPaidEmis = affectedEmis.filter((emi) => emi.status === EMI_STATUS.PAID).length;
   const partiallyPaidEmis = affectedEmis.filter((emi) => emi.status === EMI_STATUS.PARTIAL).length;
   const affectedLoanIds = [...new Set(affectedEmis.map((emi) => emi.loanId))];
-  const autoDatedCollections = created.filter((entry) => entry.dateSource === DATE_SOURCE.AUTO_EMI_DATE).length;
+  const systemDatedCollections = created.filter((entry) => entry.dateSource === DATE_SOURCE.SYSTEM_DATE).length;
 
   const reconciliation = {
     collectionAmountEqualsAllocationTotal: importedPaise === allocatedPaise,
@@ -571,11 +631,10 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
       collectionsCreated: created.length,
       importedAmount: fromPaise(importedPaise),
       collectionNumbers: created.map((entry) => entry.collection.collectionNumber),
-      // Distinguishes an explicitly-dated posting from one whose date was
-      // derived from the instalment it paid, without touching any existing
-      // audit record.
-      explicitDateCollections: created.length - autoDatedCollections,
-      autoDatedCollections,
+      // Distinguishes an explicitly-dated posting from one dated with the
+      // system date, without touching any existing audit record.
+      explicitDateCollections: created.length - systemDatedCollections,
+      systemDatedCollections,
       ...reconciliation
     }
   });
@@ -623,9 +682,10 @@ async function buildTemplate() {
         header: 'Collection Date',
         required: '',
         note:
-          'Optional. Leave it blank to have the system derive the payment date from the instalment(s) the amount ' +
-          'settles, oldest first — never from today or the upload date. If the amount spans instalments due on ' +
-          'different dates, one collection is created per date. Provide it explicitly to use that exact date instead.'
+          'Optional — this is the date the customer actually paid. Leave it blank and today\'s date is used. It is ' +
+          'never taken from an instalment due date, so paying instalments that are not due yet is fine: the payment ' +
+          'is dated today and allocated across every one of them. BACKFILLING A PAST PAYMENT? Fill this in on every ' +
+          'row — a blank is dated today, not on the date the money was actually received.'
       },
       {
         header: 'Allocation',
@@ -667,7 +727,6 @@ module.exports = {
   resolveRow,
   toCollectionPayload,
   orderChronologically,
-  emiDatesByLoan,
   groupAllocationByDate,
   evaluateRows,
   summarise,

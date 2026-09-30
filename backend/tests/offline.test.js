@@ -9467,11 +9467,134 @@ async function runRules(rules, source) {
       );
       record(
         'Bounce collection',
-        'oneBulk AUTO_EMI_DATE behaviour is untouched - bounce changed nothing about how a date is derived',
-        /DATE_SOURCE\.AUTO_EMI_DATE/.test(oneBulkSource) &&
-          /function groupAllocationByDate/.test(oneBulkSource) &&
-          /const date = emiDates\.get\(entry\.emiId\);/.test(oneBulkSource),
-        'a blank Collection Date still resolves per instalment date'
+        'bounce changed nothing about how oneBulk resolves a collection date',
+        // The point of this check is that BOUNCE does not touch date handling.
+        // It deliberately does not pin which rule that is — advance-payment
+        // support later changed a blank date from the instalment date to the
+        // system date, and that is not bounce's concern.
+        !/bounce/i.test(oneBulkSource) && /function groupAllocationByDate/.test(oneBulkSource),
+        'date resolution lives in one place, and no bounce logic reaches it'
+      );
+
+      /* ---- Advance EMI payments through oneBulk ---- */
+
+      /*
+       * A customer may pay instalments that have not fallen due yet. The
+       * collection date is when they PAID; the due dates of what the money
+       * settles are a different fact and must not become it. These pin that
+       * separation at the source, because the behavioural tests for it live in
+       * tests/oneBulk.test.js, which is deletable with the feature.
+       */
+
+      const allocationSourceForAdvance = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionAllocationService.js'), 'utf8')
+      );
+      const oneBulkUiSource = stripComments(
+        fs.readFileSync(
+          path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'oneBulk', 'OneBulkImport.jsx'),
+          'utf8'
+        )
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'a blank Collection Date can only resolve to two things, and neither is an instalment date',
+        /const DATE_SOURCE = Object\.freeze\(\{ EXPLICIT: 'EXPLICIT', SYSTEM_DATE: 'SYSTEM_DATE' \}\)/.test(oneBulkSource) &&
+          !/AUTO_EMI_DATE/.test(oneBulkSource),
+        'EXPLICIT or SYSTEM_DATE only'
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'the date resolver reads no instalment date at all: blank means today',
+        (() => {
+          const body = oneBulkSource.slice(
+            oneBulkSource.indexOf('function groupAllocationByDate'),
+            oneBulkSource.indexOf('const groupAmount =')
+          );
+          return (
+            body.length > 0 &&
+            !/emiDate|dueDate|emiNumber/.test(body) &&
+            /DATE_SOURCE\.EXPLICIT, entries: plan/.test(body) &&
+            /date: fallbackDate, source: DATE_SOURCE\.SYSTEM_DATE, entries: plan/.test(body)
+          );
+        })(),
+        'one group, dated explicitly or dated today'
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'the resolved date passes fallbackDate = asOf, so a blank date is the system date and can never be in the future',
+        /fallbackDate: asOf/.test(oneBulkSource) &&
+          (oneBulkSource.match(/fallbackDate: asOf/g) ?? []).length === 2 && // preview and commit
+          /collectionService\.assertCollectionDate\(group\.date, asOf\)/.test(oneBulkSource),
+        'the same date rule still applies, to the date actually used'
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'THE ROOT CAUSE: the FIFO planner filters by nothing but what is still owed, so a future instalment is allocatable',
+        (() => {
+          const body = allocationSourceForAdvance.slice(
+            allocationSourceForAdvance.indexOf('async function planFifoAllocation'),
+            allocationSourceForAdvance.indexOf('function splitAllocation')
+          );
+          return body.length > 0 && !/emiDate|dueDate|today|asOf/.test(body) && /if \(due === 0n\) continue;/.test(body);
+        })(),
+        'the planner never needed changing; only the date the collection carried did'
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'oneBulk still owns no allocation or posting logic of its own',
+        /allocationService\.planFifoAllocation\(/.test(oneBulkSource) &&
+          /collectionService\.createCollectionRecord\(/.test(oneBulkSource) &&
+          !/splitAllocation|computeStatus|computeDpd|amountCollected:/.test(oneBulkSource),
+        'shared planner, shared posting function'
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'the preview shows the resolved payment date, not a placeholder claiming it came from an instalment',
+        !/AUTO_EMI_DATE|AUTO — EMI DATE|EMI date, auto/.test(oneBulkUiSource) &&
+          /row\.dateGroups\[0\]\.date/.test(oneBulkUiSource) &&
+          /SYSTEM_DATE/.test(oneBulkUiSource),
+        'the date column reads what the backend resolved'
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'the preview names an advance payment for what it is, from the backend’s own flag',
+        /function advanceSummary\(row\)/.test(oneBulkUiSource) &&
+          /allocation\.future/.test(oneBulkUiSource) &&
+          /Advance payment: \{formatCurrency\(advance\.amount\)\} → \{advance\.count\} future EMI/.test(oneBulkUiSource) &&
+          // Counted and totalled from what the server planned; nothing re-derived.
+          !/planFifo|outstanding \*|emiAmount -/.test(oneBulkUiSource),
+        'Advance payment: <amount> → <n> future EMIs'
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'each allocation carries its instalment’s due date and what that instalment will still owe',
+        /emiDate: entry\.emiDate/.test(oneBulkSource) &&
+          /outstandingAfter: fromPaise\(outstandingBefore - toPaise\(entry\.amount\)\)/.test(oneBulkSource) &&
+          /allocation\.emiDate/.test(oneBulkUiSource) &&
+          /allocation\.outstandingAfter/.test(oneBulkUiSource),
+        'due date, amount allocated, remaining outstanding'
+      );
+
+      record(
+        'Advance EMI payments (oneBulk)',
+        'PREVIEW IS READ-ONLY: only the confirm handler posts, and confirmation re-plans from the ledger',
+        /previewOneBulkImport/.test(oneBulkUiSource) &&
+          (oneBulkUiSource.match(/runOneBulkImport\(/g) ?? []).length === 1 &&
+          // runImport re-parses the workbook and re-plans inside the transaction
+          // rather than accepting anything the preview computed.
+          /async function runImport\(buffer[\s\S]{0,400}await parseWorkbook\(buffer/.test(oneBulkSource) &&
+          /const \{ plan, unallocated \} = await allocationService\.planFifoAllocation\(\{[\s\S]{0,160}transaction[\s\S]{0,20}\}\);/.test(
+            oneBulkSource
+          ),
+        'the frontend preview is never trusted'
       );
 
       const migrationFiles = fs.readdirSync(path.resolve(__dirname, '..', 'migrations'));

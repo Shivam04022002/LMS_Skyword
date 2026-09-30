@@ -54,10 +54,11 @@ const COLUMNS = Object.freeze([
     width: 16,
     example: '2026-08-20',
     note:
-      'Optional. YYYY-MM-DD, and not in the future, if given. Leave blank to have the system derive the payment ' +
-      'date from the instalment(s) it settles, oldest first — a payment spanning instalments due on different ' +
-      'dates then becomes one collection per date. Rows for the same loan are applied in date order regardless ' +
-      'of where they sit in the file, oldest first; rows on the same date, or with no date, keep their file order.'
+      'Optional. The date the customer actually paid: YYYY-MM-DD, and not in the future, if given. Leave it blank ' +
+      'and today is used — it is never taken from an instalment due date, so an advance payment for instalments ' +
+      'not yet due is still dated today. Give it on every row when backfilling a past payment, or that payment ' +
+      'will be dated today. Rows for the same loan are applied in date order regardless of where they sit in the ' +
+      'file, oldest first; rows on the same date, or with no date, keep their file order.'
   },
   {
     field: 'ledgerType',
