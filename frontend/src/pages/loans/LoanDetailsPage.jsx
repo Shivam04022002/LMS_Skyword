@@ -43,12 +43,24 @@ const TRANSITION_PERMISSION = {
  */
 const TRANSITION_ACTION = {
   ACTIVE: { label: 'Activate', icon: 'bi-play-circle', className: 'btn-primary', hint: 'Activate this loan and generate its EMI schedule' },
-  CLOSED: { label: 'Close Loan', icon: 'bi-check2-circle', className: 'btn-primary', hint: 'Mark this loan closed — final, and it stops further collections' },
-  CANCELLED: { label: 'Cancel Loan', icon: 'bi-x-octagon', className: 'btn-outline-danger', hint: 'Cancel this loan — final, and it stops further collections' }
+  CLOSED: { label: 'Close Loan', icon: 'bi-check-circle', className: 'btn-primary', menuClassName: '', hint: 'Mark this loan closed — final, and it stops further collections' },
+  CANCELLED: { label: 'Cancel Loan', icon: 'bi-x-circle', className: 'btn-outline-danger', menuClassName: 'text-danger', hint: 'Cancel this loan — final, and it stops further collections' }
 };
 
 /** Status changes serious enough to require an explicit confirmation. */
 const CONFIRMED_TRANSITIONS = ['CLOSED', 'CANCELLED'];
+
+/*
+ * The two terminal actions live behind the three-dot menu rather than sitting
+ * in the header. Both are irreversible, and neither is a routine part of
+ * viewing a loan, so they are one deliberate step further away from a stray
+ * click. Activate stays a visible button: it is the ordinary next step on a
+ * draft loan, and is unchanged by this.
+ *
+ * The confirmation dialog still stands between the menu item and the API, so
+ * moving them here reduces exposure without becoming the only safeguard.
+ */
+const MENU_TRANSITIONS = ['CLOSED', 'CANCELLED'];
 
 function Row({ label, children }) {
   return (
@@ -167,7 +179,14 @@ export default function LoanDetailsPage() {
 
   if (loading) return <Spinner label="Loading loan…" />;
 
+  /*
+   * What this loan's status allows, narrowed to what the caller may actually
+   * do. The backend re-checks both on every request; hiding an action here is
+   * convenience, never the control.
+   */
   const transitions = loan ? (ALLOWED_TRANSITIONS[loan.status] ?? []).filter((status) => can(TRANSITION_PERMISSION[status])) : [];
+  const inlineTransitions = transitions.filter((status) => !MENU_TRANSITIONS.includes(status));
+  const menuTransitions = transitions.filter((status) => MENU_TRANSITIONS.includes(status));
   const editable = loan && EDITABLE_STATUSES.includes(loan.status) && can(PERMISSIONS.LOANS_UPDATE);
 
   return (
@@ -199,7 +218,7 @@ export default function LoanDetailsPage() {
                     Edit terms
                   </button>
                 ) : null}
-                {transitions.map((status) => {
+                {inlineTransitions.map((status) => {
                   const action = TRANSITION_ACTION[status];
                   return (
                     <button
@@ -215,6 +234,58 @@ export default function LoanDetailsPage() {
                     </button>
                   );
                 })}
+
+                {/*
+                  * Bootstrap's own dropdown, the same one the header user menu
+                  * uses. Its JS is already bundled, so dismissing on outside
+                  * click, on Escape and on choosing an item, the arrow-key
+                  * navigation and the aria-expanded state all come with it
+                  * rather than being reimplemented here.
+                  *
+                  * Rendered only when the loan's status and the caller's
+                  * permissions leave at least one action available, so an empty
+                  * menu can never appear.
+                  */}
+                {menuTransitions.length > 0 ? (
+                  <div className="dropdown">
+                    <button
+                      type="button"
+                      id="loan-actions-menu"
+                      className="btn btn-outline-secondary"
+                      data-bs-toggle="dropdown"
+                      aria-expanded="false"
+                      aria-label="More loan actions"
+                      title="More loan actions"
+                      disabled={busy}
+                    >
+                      <i className="bi bi-three-dots-vertical" aria-hidden="true" />
+                    </button>
+
+                    <ul className="dropdown-menu dropdown-menu-end shadow-sm" aria-labelledby="loan-actions-menu">
+                      {menuTransitions.map((status) => {
+                        const action = TRANSITION_ACTION[status];
+                        return (
+                          <li key={status}>
+                            <button
+                              type="button"
+                              className={`dropdown-item ${action.menuClassName}`.trim()}
+                              // Stops the click reaching the surrounding card.
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                requestTransition(status);
+                              }}
+                              disabled={busy}
+                              title={action.hint}
+                            >
+                              <i className={`bi ${action.icon} me-2`} aria-hidden="true" />
+                              {action.label}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                ) : null}
               </div>
             </div>
             {!editable && loan.status !== 'DRAFT' ? (

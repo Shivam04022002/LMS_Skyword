@@ -11802,17 +11802,21 @@ async function runRules(rules, source) {
       'Loan actions',
       'each carries its own icon, so the two are distinguishable without relying on colour',
       (() => {
-        const close = /CLOSED: \{ label: 'Close Loan', icon: '([\w-]+)', className: '([\w-]+)'/.exec(page);
-        const cancel = /CANCELLED: \{ label: 'Cancel Loan', icon: '([\w-]+)', className: '([\w-]+)'/.exec(page);
+        const close = /CLOSED: \{ label: 'Close Loan', icon: '([\w-]+)'[\s\S]{0,60}?menuClassName: '([\w-]*)'/.exec(page);
+        const cancel = /CANCELLED: \{ label: 'Cancel Loan', icon: '([\w-]+)'[\s\S]{0,60}?menuClassName: '([\w-]*)'/.exec(page);
         return (
           close && cancel &&
+          // Different icons: the non-colour signal separating the two.
           close[1] !== cancel[1] &&
-          close[2] === 'btn-primary' &&
-          cancel[2] === 'btn-outline-danger' &&
+          close[1] === 'bi-check-circle' &&
+          cancel[1] === 'bi-x-circle' &&
+          // Danger styling on the destructive one, plain on the routine one.
+          close[2] === '' &&
+          cancel[2] === 'text-danger' &&
           /<i className=\{`bi \$\{action\.icon\} me-2`\}/.test(page)
         );
       })(),
-      'bi-check2-circle / btn-primary vs bi-x-octagon / btn-outline-danger'
+      'bi-check-circle (plain) vs bi-x-circle (text-danger)'
     );
 
     record(
@@ -11829,12 +11833,14 @@ async function runRules(rules, source) {
 
     record(
       'Loan actions',
-      '2. clicking either button only opens its dialog — it does not call the API',
+      '2. choosing either menu item only opens its dialog — it does not call the API',
       /const requestTransition = \(status\) => \{[\s\S]{0,260}setPendingTransition\(status\);\s*return;/.test(page) &&
-        /onClick=\{\(\) => requestTransition\(status\)\}/.test(page) &&
-        // The button no longer calls the transition directly.
-        !/onClick=\{\(\) => handleTransition\(status\)\}/.test(page),
-      'the button sets pending state; only the dialog confirms'
+        // The menu item routes through requestTransition, never straight to the API.
+        /event\.stopPropagation\(\);\s*requestTransition\(status\);/.test(page) &&
+        // Nothing anywhere calls the transition directly from a click.
+        !/onClick=\{\(\) => handleTransition\(status\)\}/.test(page) &&
+        !/onClick=\{\(\) => updateLoanStatus/.test(page),
+      'the menu item sets pending state; only the dialog confirms'
     );
 
     record(
@@ -12115,6 +12121,162 @@ async function runRules(rules, source) {
       /const CONFIRMED_TRANSITIONS = \['CLOSED', 'CANCELLED'\]/.test(page) &&
         /ACTIVE: \{ label: 'Activate'/.test(page),
       'scope limited to the ambiguous, irreversible pair'
+    );
+  }
+
+  // ---------- Loan details: three-dot actions menu ----------
+  {
+    /*
+     * Close Loan and Cancel Loan moved out of the header and behind a three-dot
+     * menu. Both are terminal, so putting them one deliberate step further from
+     * a stray click matters — but the confirmation dialog still stands between
+     * the menu item and the API, and the backend still re-checks everything.
+     */
+    const menuPage = stripComments(
+      fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'pages', 'loans', 'LoanDetailsPage.jsx'), 'utf8')
+    );
+    const header = stripComments(
+      fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'layout', 'Header.jsx'), 'utf8')
+    );
+
+    record(
+      'Loan actions menu',
+      'the two terminal actions are routed into the menu; Activate stays a visible button',
+      /const MENU_TRANSITIONS = \['CLOSED', 'CANCELLED'\]/.test(menuPage) &&
+        /const inlineTransitions = transitions\.filter\(\(status\) => !MENU_TRANSITIONS\.includes\(status\)\)/.test(menuPage) &&
+        /const menuTransitions = transitions\.filter\(\(status\) => MENU_TRANSITIONS\.includes\(status\)\)/.test(menuPage),
+      'CLOSED and CANCELLED in the menu, ACTIVE unchanged in the header'
+    );
+
+    record(
+      'Loan actions menu',
+      'the trigger is a three-dots-vertical button in the header action area',
+      /<i className="bi bi-three-dots-vertical" aria-hidden="true" \/>/.test(menuPage) &&
+        // Inside the labelled action group, where the two buttons used to sit.
+        menuPage.indexOf('aria-label="Loan actions"') < menuPage.indexOf('bi-three-dots-vertical'),
+      'replaces the two permanently visible buttons'
+    );
+
+    record(
+      'Loan actions menu',
+      'it reuses the project’s existing Bootstrap dropdown convention, not a hand-rolled one',
+      // Same markup contract as the header user menu, whose JS is already bundled.
+      /data-bs-toggle="dropdown"/.test(menuPage) &&
+        /className="dropdown-menu dropdown-menu-end shadow-sm"/.test(menuPage) &&
+        /<div className="dropdown">/.test(menuPage) &&
+        /data-bs-toggle="dropdown"/.test(header) &&
+        /dropdown-menu dropdown-menu-end shadow-sm/.test(header),
+      'dismiss-on-outside-click, Escape, arrow keys and aria-expanded come from Bootstrap'
+    );
+
+    record(
+      'Loan actions menu',
+      'bootstrap’s dropdown JS is actually bundled, so that behaviour is really present',
+      /import 'bootstrap\/dist\/js\/bootstrap\.bundle\.min\.js'/.test(
+        stripComments(fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'main.jsx'), 'utf8'))
+      ),
+      'bootstrap.bundle.min.js is imported at app entry'
+    );
+
+    record(
+      'Loan actions menu',
+      'the trigger and the menu are accessibly labelled and associated',
+      /aria-label="More loan actions"/.test(menuPage) &&
+        /aria-expanded="false"/.test(menuPage) &&
+        /id="loan-actions-menu"/.test(menuPage) &&
+        /aria-labelledby="loan-actions-menu"/.test(menuPage),
+      'named trigger, expanded state, menu tied back to its button'
+    );
+
+    record(
+      'Loan actions menu',
+      'items are real buttons in a list, so keyboard activation works',
+      /<li key=\{status\}>/.test(menuPage) &&
+        /className=\{`dropdown-item \$\{action\.menuClassName\}`\.trim\(\)\}/.test(menuPage) &&
+        /type="button"/.test(menuPage),
+      'ul > li > button, the same shape as the header menu'
+    );
+
+    record(
+      'Loan actions menu',
+      'choosing an item does not bubble to the surrounding card',
+      /event\.stopPropagation\(\);/.test(menuPage),
+      'no parent click handler or navigation is triggered'
+    );
+
+    record(
+      'Loan actions menu',
+      'an empty menu can never render: it appears only when an action is available',
+      /\{menuTransitions\.length > 0 \? \(/.test(menuPage),
+      'hidden entirely when status or permissions leave nothing to do'
+    );
+
+    record(
+      'Loan actions menu',
+      'PERMISSION-BASED VISIBILITY: the menu is built from the permission-filtered list',
+      /\(ALLOWED_TRANSITIONS\[loan\.status\] \?\? \[\]\)\.filter\(\(status\) => can\(TRANSITION_PERMISSION\[status\]\)\)/.test(menuPage) &&
+        /CLOSED: PERMISSIONS\.LOANS_CLOSE/.test(menuPage) &&
+        /CANCELLED: PERMISSIONS\.LOANS_CANCEL/.test(menuPage),
+      'loans.close / loans.cancel decide what appears'
+    );
+
+    record(
+      'Loan actions menu',
+      'STATUS-BASED AVAILABILITY matches the backend lifecycle exactly',
+      (() => {
+        const constants = stripComments(
+          fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'utils', 'loanConstants.js'), 'utf8')
+        );
+        const svc = require('../src/services/loanStatusService');
+        // The table the UI filters with must agree with the backend's own.
+        const norm = (m) => (m ? m[1].replace(/['\s]/g, '').split(',').filter(Boolean) : null);
+        const uiActive = norm(/ACTIVE: \[([^\]]*)\]/.exec(constants));
+        const uiDraft = norm(/DRAFT: \[([^\]]*)\]/.exec(constants));
+        return (
+          JSON.stringify(uiActive) === JSON.stringify(svc.ALLOWED_TRANSITIONS.ACTIVE) &&
+          JSON.stringify(uiDraft) === JSON.stringify(svc.ALLOWED_TRANSITIONS.DRAFT)
+        );
+      })(),
+      'close only from ACTIVE; cancel from DRAFT or ACTIVE - same list both sides'
+    );
+
+    record(
+      'Loan actions menu',
+      'the menu is disabled while a status change is already running',
+      (() => {
+        const block = menuPage.slice(menuPage.indexOf('menuTransitions.length > 0'), menuPage.indexOf('</div>', menuPage.indexOf('dropdown-menu')));
+        return (block.match(/disabled=\{busy\}/g) ?? []).length >= 2;
+      })(),
+      'both the trigger and each item respect the busy flag'
+    );
+
+    record(
+      'Loan actions menu',
+      'the header identity block is untouched — number, badge and amount as before',
+      /<span className="badge text-bg-light border font-monospace fs-6">\{loan\.loanNumber\}<\/span>/.test(menuPage) &&
+        /<LoanStatusBadge status=\{loan\.status\} size="lg" \/>/.test(menuPage) &&
+        /<h1 className="h3 fw-bold mb-0">\{formatCurrency\(loan\.loanAmount\)\}<\/h1>/.test(menuPage),
+      'only the action area changed'
+    );
+
+    record(
+      'Loan actions menu',
+      'the confirmation dialog is still the only route to the API, and is reused unchanged',
+      /<LoanStatusConfirmModal/.test(menuPage) &&
+        /status=\{pendingTransition\}/.test(menuPage) &&
+        /onConfirm=\{handleTransition\}/.test(menuPage) &&
+        // The menu never calls updateLoanStatus itself.
+        !/dropdown-item[\s\S]{0,300}updateLoanStatus/.test(menuPage),
+      'menu -> pendingTransition -> dialog -> existing endpoint'
+    );
+
+    record(
+      'Loan actions menu',
+      'Edit terms and Back to loans are unaffected',
+      /Edit terms/.test(menuPage) &&
+        /Back to loans/.test(menuPage) &&
+        menuPage.indexOf('Back to loans') < menuPage.indexOf('aria-label="Loan actions"'),
+      'unrelated header controls left in place'
     );
   }
 
