@@ -1,6 +1,7 @@
 'use strict';
 
 const reportService = require('../services/reportService');
+const analyticsService = require('../services/analyticsService');
 const auditService = require('../services/auditService');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
@@ -116,4 +117,27 @@ const demandCollectionReport = reportHandler({
   rowsOf: (data) => data.rows
 });
 
-module.exports = { loanReport, collectionReport, bounceCollectionReport, emiReport, demandCollectionReport };
+/*
+ * Graph & Analytics goes through the SAME handler as every report, which is the
+ * whole point of it being a report key: reports.view to read it, reports.export
+ * additionally to download it, the export audited with its filters, the row
+ * ceiling enforced, and the workbook built by the shared builder from the
+ * report's own summary block. No new permission and no second export path.
+ *
+ * The rows are the chart points the screen is drawing, flattened by the service
+ * itself, so the file cannot contain a different dataset from the charts.
+ */
+const analyticsReport = reportHandler({
+  key: REPORTS.ANALYTICS,
+  run: analyticsService.analytics,
+  rowsOf: (data) => data.rows
+});
+
+module.exports = {
+  loanReport,
+  collectionReport,
+  bounceCollectionReport,
+  emiReport,
+  demandCollectionReport,
+  analyticsReport
+};

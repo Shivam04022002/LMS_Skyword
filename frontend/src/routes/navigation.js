@@ -104,6 +104,18 @@ export const NAV_SECTIONS = [
         permission: [PERMISSIONS.REPORTS_VIEW],
         roles: [],
         available: true
+      },
+      {
+        // The same permission as the reports it charts: it shows their figures,
+        // so anyone who may read a report may read the graph of it, and anyone
+        // who may not is refused by the backend as well as by this list.
+        id: 'analytics',
+        label: 'Graph',
+        path: '/analytics',
+        icon: 'bi-bar-chart-line',
+        permission: [PERMISSIONS.REPORTS_VIEW],
+        roles: [],
+        available: true
       }
     ]
   },

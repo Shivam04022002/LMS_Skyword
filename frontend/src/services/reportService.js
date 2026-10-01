@@ -26,6 +26,16 @@ export const getBounceCollectionReport = (params) =>
   api.get('/admin/reports/bounce-collections', { params: toQuery(params) });
 
 /**
+ * Graph & Analytics — chart series for one section.
+ *
+ * Aggregated server-side: the response carries the points a chart draws, never
+ * the loans, instalments or collections behind them, so the browser does not
+ * receive a book to total up. It is a report key, so `exportReportExcel` already
+ * downloads it with the same filters.
+ */
+export const getAnalytics = (params) => api.get('/admin/reports/analytics', { params: toQuery(params) });
+
+/**
  * Downloads a report as CSV.
  *
  * Goes through the shared Axios client so the auth header, the 401 handler and

@@ -4,8 +4,22 @@ export const REPORTS = Object.freeze({
   COLLECTIONS: 'collections',
   EMIS: 'emis',
   DEMAND_COLLECTIONS: 'demand-collections',
-  BOUNCE_COLLECTIONS: 'bounce-collections'
+  BOUNCE_COLLECTIONS: 'bounce-collections',
+  ANALYTICS: 'analytics'
 });
+
+/** Mirrors ANALYTICS_SECTIONS in backend/src/config/reports.js. */
+export const ANALYTICS_SECTIONS = Object.freeze({
+  LOANS: 'loans',
+  DEMAND: 'demand',
+  COLLECTIONS: 'collections',
+  EMIS: 'emis',
+  BOUNCE: 'bounce',
+  DEMAND_VS_COLLECTION: 'demand-vs-collection'
+});
+
+/** Mirrors ANALYTICS_BUCKETS in backend/src/config/reports.js. */
+export const ANALYTICS_BUCKETS = Object.freeze({ DAY: 'day', WEEK: 'week', MONTH: 'month' });
 
 export const REPORT_PAGES = [
   { key: REPORTS.LOANS, path: '/reports/loans', label: 'Loan report', icon: 'bi-cash-coin' },

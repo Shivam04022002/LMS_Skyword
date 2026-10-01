@@ -24,6 +24,7 @@ import CollectionReportPage from '../pages/reports/CollectionReportPage';
 import EmiReportPage from '../pages/reports/EmiReportPage';
 import DemandCollectionReportPage from '../pages/reports/DemandCollectionReportPage';
 import BounceCollectionReportPage from '../pages/reports/BounceCollectionReportPage';
+import GraphAnalyticsPage from '../pages/analytics/GraphAnalyticsPage';
 import CollectionReceiptPage from '../pages/receipts/CollectionReceiptPage';
 // TEMPORARY: oneBulk historical collection migration utility. Remove this
 // import and its <Route> below to remove the feature entirely.
@@ -83,6 +84,9 @@ export default function AppRoutes() {
             <Route path="/reports/emis" element={<EmiReportPage />} />
             <Route path="/reports/demand" element={<DemandCollectionReportPage />} />
             <Route path="/reports/bounce-collections" element={<BounceCollectionReportPage />} />
+            {/* Graph & Analytics charts the same figures these reports list, so
+                it sits behind the same permission gate rather than a new one. */}
+            <Route path="/analytics" element={<GraphAnalyticsPage />} />
           </Route>
 
           <Route element={<RequirePermission anyOf={[PERMISSIONS.RECEIPTS_VIEW]} />}>

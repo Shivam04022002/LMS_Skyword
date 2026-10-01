@@ -12,7 +12,8 @@ const {
   collectionReportRules,
   bounceCollectionReportRules,
   emiReportRules,
-  demandCollectionReportRules
+  demandCollectionReportRules,
+  analyticsRules
 } = require('../validators/reportValidator');
 
 const router = express.Router();
@@ -49,6 +50,10 @@ router.get('/collections', ...report(collectionReportRules, reportController.col
 router.get('/bounce-collections', ...report(bounceCollectionReportRules, reportController.bounceCollectionReport));
 router.get('/emis', ...report(emiReportRules, reportController.emiReport));
 router.get('/demand-collections', ...report(demandCollectionReportRules, reportController.demandCollectionReport));
+// Graph & Analytics. Same `report()` wrapper as the five above, so the
+// permission gates, the validation step and the export check are the identical
+// middleware chain rather than a parallel one.
+router.get('/analytics', ...report(analyticsRules, reportController.analyticsReport));
 
 /**
  * Reports are strictly read-only — no mutating verb is mounted here, and the
