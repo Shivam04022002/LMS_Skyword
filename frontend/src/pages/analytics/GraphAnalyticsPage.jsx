@@ -77,6 +77,47 @@ const DEFAULT_TYPE = {
 /** Charts whose measure is a count of records rather than money. */
 const COUNT_CHARTS = new Set(['dpdDistribution']);
 
+/*
+ * A line of plain English under each chart title, saying what the chart plots.
+ *
+ * Presentational only — it describes the figures, it does not produce them, and
+ * where the backend attaches its own caveat to a chart that caveat wins, because
+ * it explains something about the numbers rather than merely naming them.
+ */
+const CHART_DESCRIPTION = {
+  loansByStatus: 'How many loans sit in each status, and what they are worth',
+  loanAmountByType: 'Sanctioned value by product type',
+  disbursementOverTime: 'Sanctioned value by the period each loan starts',
+  loansCreatedOverTime: 'Loans entered on the system, by the period they were created',
+  demandByRoute: 'Outstanding instalment value by the route the loan is assigned to',
+  collectionsOverTime: 'Money posted in each period, split into instalment and bounce',
+  collectionsByRoute: 'Money posted by the route the loan is assigned to',
+  collectionsByMode: 'Share of money posted by payment mode',
+  emiStatusDistribution: 'Share of scheduled value by current instalment status',
+  emiDemandVsCollected: 'Scheduled value against what has been collected towards it',
+  emiOutstandingOverTime: 'Scheduled value still uncollected, by the period it fell due',
+  dpdDistribution: 'How many instalments are owing, by how far past due they are',
+  bounceAssessedOverTime: 'Charges levied on instalments, by the period the instalment fell due',
+  bounceCollectedOverTime: 'Money received against bounce charges, by the period it was received',
+  bounceAssessedVsCollected: 'The two side by side',
+  demandVsCollectedByRoute: 'Outstanding demand against money posted, per route'
+};
+
+/*
+ * How wide a chart card should be.
+ *
+ * A date series stretched across a wide screen becomes a very long, very short
+ * strip, so a series is given the full width only when it has enough points to
+ * need it. Everything else sits two to a row, where it stays readable and the
+ * row is filled rather than half empty.
+ */
+const WIDE_SERIES_POINTS = 10;
+
+function chartSpan(chart) {
+  const wide = chart.kind === 'series' && (chart.points?.length ?? 0) >= WIDE_SERIES_POINTS;
+  return wide ? { className: 'col-12', variant: 'wide' } : { className: 'col-12 col-xl-6', variant: 'compact' };
+}
+
 /** The caveat each section needs stated before its charts are read. */
 const SECTION_NOTE = {
   [ANALYTICS_SECTIONS.BOUNCE]: {
@@ -315,19 +356,22 @@ export default function GraphAnalyticsPage() {
       ) : null}
 
       <div className="row g-3">
-        {chartEntries.map(([key, chart]) => (
-          // A date series needs the full width to be readable; a category
-          // breakdown reads well in half, and pairs up on a wide screen.
-          <div className={chart.kind === 'series' ? 'col-12' : 'col-12 col-xl-6'} key={key}>
-            <ChartCard
-              chart={chart}
-              bucket={data?.bucket ?? applied.bucket}
-              loading={loading}
-              valueKind={COUNT_CHARTS.has(key) ? 'count' : 'money'}
-              defaultType={DEFAULT_TYPE[key] ?? 'bar'}
-            />
-          </div>
-        ))}
+        {chartEntries.map(([key, chart]) => {
+          const span = chartSpan(chart);
+          return (
+            <div className={span.className} key={key}>
+              <ChartCard
+                chart={chart}
+                bucket={data?.bucket ?? applied.bucket}
+                loading={loading}
+                valueKind={COUNT_CHARTS.has(key) ? 'count' : 'money'}
+                defaultType={DEFAULT_TYPE[key] ?? 'bar'}
+                description={CHART_DESCRIPTION[key]}
+                variant={span.variant}
+              />
+            </div>
+          );
+        })}
 
         {/* Nothing drawn yet: loading on first paint, or a selection with no charts. */}
         {chartEntries.length === 0 ? (

@@ -605,11 +605,13 @@ body {
 .lms-analytics-page {
   /* One spacing scale for the whole page, so the header, filters, cards and
      charts sit on the same rhythm instead of each choosing its own margin. */
-  --lms-analytics-gap: 1rem;
   --lms-analytics-radius: 0.75rem;
-  --lms-analytics-border: #e6e9f0;
+  --lms-analytics-border: #e3e7ef;
   --lms-analytics-ink: #10233f;
   --lms-analytics-muted: #6b7280;
+  --lms-analytics-faint: #f7f8fb;
+  /* Financial figures line up in a column only with tabular numerals. */
+  font-variant-numeric: tabular-nums;
 }
 
 /* A surface: a hairline border and a shadow you have to look for, rather than a
@@ -624,24 +626,42 @@ body {
 /* ---- header ---- */
 
 .lms-analytics-title {
-  font-size: 1.5rem;
+  font-size: 1.4375rem;
   font-weight: 700;
   line-height: 1.2;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
   color: var(--lms-analytics-ink);
   margin: 0;
 }
 
 .lms-analytics-subtitle {
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   line-height: 1.5;
   color: var(--lms-analytics-muted);
-  margin: 0.25rem 0 0;
-  max-width: 62ch;
+  margin: 0.1875rem 0 0;
+  max-width: 64ch;
 }
 
-/* The applied-filter summary. Chips wrap rather than scroll: they are a
-   statement of what is on screen, so every one of them must stay readable. */
+/* Consistent action buttons: one height, one radius, icons optically centred. */
+.lms-analytics-page .lms-analytics-action {
+  height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0 0.875rem;
+  border-radius: 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.lms-analytics-page .lms-analytics-action i {
+  font-size: 0.9375rem;
+  line-height: 1;
+}
+
+/* The applied-filter summary. Chips wrap rather than scroll: they state what is
+   on screen, so every one of them has to stay readable. */
 .lms-analytics-chips {
   display: flex;
   flex-wrap: wrap;
@@ -652,18 +672,31 @@ body {
 .lms-analytics-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.3125rem;
-  padding: 0.1875rem 0.5rem;
+  gap: 0.375rem;
+  padding: 0.25rem 0.5rem 0.25rem 0.3125rem;
   font-size: 0.75rem;
   line-height: 1.4;
-  border-radius: 0.375rem;
-  background: #f4f6fa;
+  border-radius: 0.5rem;
+  background: #fff;
   border: 1px solid var(--lms-analytics-border);
   color: #374151;
   white-space: nowrap;
   max-width: 100%;
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+/* A small tinted tile, the same idea as the metric-card icon at a smaller size. */
+.lms-analytics-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 0.3125rem;
+  background: #eef2fb;
+  color: var(--lms-analytics-ink);
+  font-size: 0.6875rem;
+  flex: 0 0 auto;
 }
 
 .lms-analytics-chip-key {
@@ -673,16 +706,18 @@ body {
 .lms-analytics-chip-value {
   font-weight: 600;
   color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---- section tabs ---- */
 
-/* A scroll container on narrow screens; a plain row once everything fits. The
-   page itself never gains a horizontal scrollbar. */
+/* Scrolls on a narrow screen; spreads across the bar on a wide one. The scroll
+   is confined to the strip, so the page itself never overflows sideways. */
 .lms-analytics-tabs {
   display: flex;
   gap: 0.25rem;
-  padding: 0.25rem;
+  padding: 0.3125rem;
   overflow-x: auto;
   scrollbar-width: thin;
   -webkit-overflow-scrolling: touch;
@@ -691,6 +726,7 @@ body {
 .lms-analytics-tab {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.4375rem;
   flex: 0 0 auto;
   padding: 0.5rem 0.875rem;
@@ -698,15 +734,24 @@ body {
   border-radius: 0.5rem;
   background: transparent;
   color: #4b5563;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   font-weight: 500;
   line-height: 1.4;
   white-space: nowrap;
   transition: background-color 0.12s ease-in-out, color 0.12s ease-in-out, border-color 0.12s ease-in-out;
 }
 
+/* Once there is room for all six, they share the bar instead of huddling at the
+   left with a long empty tail. */
+@media (min-width: 992px) {
+  .lms-analytics-tab {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
 .lms-analytics-tab:hover:not(:disabled):not([aria-current='page']) {
-  background: #f4f6fa;
+  background: var(--lms-analytics-faint);
   color: #1f2937;
 }
 
@@ -725,7 +770,7 @@ body {
 }
 
 .lms-analytics-tab:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
 }
 
 /* ---- filter panel ---- */
@@ -735,13 +780,14 @@ body {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding-bottom: 0.75rem;
-  margin-bottom: 0.875rem;
-  border-bottom: 1px solid var(--lms-analytics-border);
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
 }
 
 .lms-analytics-filters-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
   font-size: 0.8125rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -750,24 +796,63 @@ body {
   margin: 0;
 }
 
-/* A labelled group of related controls — dates together, scope together. */
+/*
+ * Groups share one row and are sized BY HOW MANY FIELDS THEY HOLD, so a Scope
+ * group with a single select does not claim the same width as a Period group
+ * with four. That is what removes the dead space: there is no fixed column to
+ * leave empty, and a section that shows fewer filters simply yields a shorter,
+ * denser panel.
+ */
+.lms-analytics-filter-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: stretch;
+}
+
+.lms-analytics-filter-group {
+  flex: var(--lms-group-weight, 1) 1 var(--lms-group-basis, 14rem);
+  min-width: 0;
+  padding: 0.625rem 0.75rem 0.75rem;
+  background: var(--lms-analytics-faint);
+  border: 1px solid var(--lms-analytics-border);
+  border-radius: 0.625rem;
+}
+
+.lms-analytics-group-label {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b94a6;
+  margin: 0 0 0.5rem;
+}
+
+/* Fields inside a group: as many per row as fit, never fewer than one. */
+.lms-analytics-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.625rem 0.75rem;
+}
+
 .lms-analytics-field-label {
   display: block;
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
   font-weight: 600;
-  color: #4b5563;
-  margin-bottom: 0.25rem;
+  color: #566074;
+  margin-bottom: 0.1875rem;
 }
 
 /* Matched control heights, so a row of inputs and selects lines up. */
 .lms-analytics-page .form-control,
 .lms-analytics-page .form-select {
-  height: 2.375rem;
-  padding-top: 0.375rem;
-  padding-bottom: 0.375rem;
-  font-size: 0.875rem;
-  border-color: #d7dce5;
+  height: 2.25rem;
+  padding-top: 0.3125rem;
+  padding-bottom: 0.3125rem;
+  font-size: 0.8125rem;
+  border-color: #d5dae4;
   border-radius: 0.5rem;
+  background-color: #fff;
 }
 
 .lms-analytics-page .form-control:focus,
@@ -776,13 +861,18 @@ body {
   box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.12);
 }
 
-.lms-analytics-group-label {
-  font-size: 0.6875rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #9ca3af;
-  margin-bottom: 0.375rem;
+/* An unapplied edit is called out in words as well as colour. */
+.lms-analytics-dirty {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: #8a5a00;
+  background: #fff6e5;
+  border: 1px solid #f3dcae;
+  border-radius: 0.5rem;
 }
 
 /* ---- metric cards ---- */
@@ -791,7 +881,7 @@ body {
   display: flex;
   align-items: flex-start;
   gap: 0.75rem;
-  padding: 1rem;
+  padding: 0.875rem 1rem;
   height: 100%;
 }
 
@@ -799,43 +889,48 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 0.625rem;
-  font-size: 1.125rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.5rem;
+  font-size: 1rem;
   flex: 0 0 auto;
 }
 
 .lms-analytics-metric-label {
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.6875rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--lms-analytics-muted);
+  letter-spacing: 0.05em;
+  color: #78839a;
   margin: 0 0 0.125rem;
-  /* Two words or ten, the card keeps its height. */
-  min-height: 1.125rem;
 }
 
 /* The number is the point of the card. */
 .lms-analytics-metric-value {
-  font-size: 1.375rem;
+  font-size: 1.3125rem;
   font-weight: 700;
-  line-height: 1.15;
+  line-height: 1.2;
   color: #111827;
   margin: 0;
-  /* Long INR figures wrap inside the card instead of widening it. */
+  /* A long INR figure wraps inside the card instead of widening it. */
   overflow-wrap: anywhere;
 }
 
 .lms-analytics-metric-sub {
   font-size: 0.75rem;
   line-height: 1.4;
-  color: #9ca3af;
-  margin: 0.1875rem 0 0;
+  color: #8b94a6;
+  margin: 0.125rem 0 0;
 }
 
 /* ---- chart cards ---- */
+
+.lms-analytics-chart {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0.875rem 1rem 1rem;
+}
 
 .lms-analytics-chart-head {
   display: flex;
@@ -849,7 +944,7 @@ body {
 .lms-analytics-chart-title {
   font-size: 0.9375rem;
   font-weight: 600;
-  line-height: 1.35;
+  line-height: 1.3;
   color: var(--lms-analytics-ink);
   margin: 0;
 }
@@ -858,8 +953,18 @@ body {
   font-size: 0.75rem;
   line-height: 1.45;
   color: var(--lms-analytics-muted);
-  margin: 0.1875rem 0 0;
-  max-width: 70ch;
+  margin: 0.125rem 0 0;
+  max-width: 72ch;
+}
+
+/* The plot fills whatever height the card has left, so two cards side by side
+   end up the same height whatever their headers do. */
+.lms-analytics-chart-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
 }
 
 /* The bar / line / pie switch. */
@@ -867,7 +972,7 @@ body {
   display: inline-flex;
   gap: 0.125rem;
   padding: 0.125rem;
-  background: #f4f6fa;
+  background: var(--lms-analytics-faint);
   border: 1px solid var(--lms-analytics-border);
   border-radius: 0.5rem;
   flex: 0 0 auto;
@@ -882,7 +987,7 @@ body {
   border: 0;
   border-radius: 0.375rem;
   background: transparent;
-  color: #6b7280;
+  color: #78839a;
   font-size: 0.8125rem;
   transition: background-color 0.12s ease-in-out, color 0.12s ease-in-out;
 }
@@ -907,15 +1012,15 @@ body {
 .lms-analytics-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.375rem;
-  margin-bottom: 0.75rem;
+  gap: 0.3125rem;
+  margin-bottom: 0.625rem;
 }
 
 .lms-analytics-legend-item {
   display: inline-flex;
   align-items: center;
   gap: 0.375rem;
-  padding: 0.25rem 0.5rem;
+  padding: 0.1875rem 0.5rem;
   border: 1px solid var(--lms-analytics-border);
   border-radius: 0.375rem;
   background: #fff;
@@ -927,7 +1032,7 @@ body {
 
 .lms-analytics-legend-item:hover {
   border-color: #c3cad8;
-  background: #fafbfd;
+  background: var(--lms-analytics-faint);
 }
 
 .lms-analytics-legend-item:focus-visible {
@@ -938,7 +1043,7 @@ body {
 /* A hidden series is struck through as well as emptied, so the state does not
    depend on seeing the swatch fill. */
 .lms-analytics-legend-item[aria-pressed='false'] {
-  background: #f4f6fa;
+  background: var(--lms-analytics-faint);
   color: #9ca3af;
 }
 
@@ -947,8 +1052,8 @@ body {
 }
 
 .lms-analytics-swatch {
-  width: 0.75rem;
-  height: 0.75rem;
+  width: 0.6875rem;
+  height: 0.6875rem;
   border-radius: 0.1875rem;
   display: inline-block;
   flex: 0 0 auto;
@@ -959,11 +1064,11 @@ body {
 .lms-analytics-tooltip {
   position: absolute;
   z-index: 3;
-  min-width: 11rem;
-  max-width: 17rem;
+  min-width: 10.5rem;
+  max-width: 16rem;
   padding: 0.5rem 0.625rem;
   background: #fff;
-  border: 1px solid #d7dce5;
+  border: 1px solid #d5dae4;
   border-radius: 0.5rem;
   box-shadow: 0 0.5rem 1.25rem rgba(16, 35, 63, 0.16);
   font-size: 0.75rem;
@@ -986,7 +1091,6 @@ body {
 .lms-analytics-tooltip-value {
   margin-left: auto;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
   color: #111827;
   white-space: nowrap;
 }
@@ -997,14 +1101,14 @@ body {
   list-style: none;
   margin: 0;
   padding: 0;
-  font-size: 0.8125rem;
+  font-size: 0.78125rem;
 }
 
 .lms-analytics-pie-legend li {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.375rem 0;
+  padding: 0.3125rem 0;
   border-bottom: 1px solid #f1f3f7;
 }
 
@@ -1015,7 +1119,6 @@ body {
 .lms-analytics-pie-amount {
   margin-left: auto;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -1023,7 +1126,6 @@ body {
   min-width: 3.25rem;
   text-align: right;
   color: var(--lms-analytics-muted);
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -1034,15 +1136,15 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.375rem;
-  min-height: 15rem;
+  gap: 0.25rem;
+  min-height: 13rem;
   color: var(--lms-analytics-muted);
   text-align: center;
-  padding: 1.5rem;
+  padding: 1.25rem;
 }
 
 .lms-analytics-placeholder-icon {
-  font-size: 1.75rem;
+  font-size: 1.625rem;
   color: #c3cad8;
 }
 

@@ -9,52 +9,62 @@ import { colorFor, compactInr, exactInr, niceScale, seriesOf, shortLabel, thinLa
  * are identical, and keeping them in one place is what stops a bar chart and a
  * line chart of the same data from disagreeing.
  *
- * The SVG uses a fixed viewBox and scales to its container, so it is readable at
- * phone width without a second layout. Values are positioned in viewBox units;
- * nothing measures the DOM.
+ * TWO SHAPES. A chart card is either the full width of the page or half of it,
+ * and one viewBox cannot serve both: stretched across a wide screen the full-
+ * width ratio becomes a very long, very short strip. `variant` picks the ratio
+ * the card will actually be rendered at — roughly 3:1 for a wide card, 5:3 for a
+ * half-width one — so neither ends up a letterbox. Everything else is shared.
+ *
+ * The SVG scales to its container, so it is readable at phone width without a
+ * second layout. Values are positioned in viewBox units; nothing measures the DOM.
  */
 
-const VIEW = { width: 960, height: 330 };
 /*
  * Left padding carries a compact INR tick ("₹12.3L"), bottom padding carries a
  * rotated date label. Both are sized for the longest label those formatters can
  * produce, so a tick is never clipped and a label never collides with the next.
  */
-const PAD = { top: 12, right: 20, bottom: 56, left: 76 };
-const PLOT = {
-  width: VIEW.width - PAD.left - PAD.right,
-  height: VIEW.height - PAD.top - PAD.bottom
+const SHAPE = {
+  wide: { width: 960, height: 320, pad: { top: 12, right: 20, bottom: 54, left: 74 } },
+  compact: { width: 560, height: 340, pad: { top: 12, right: 14, bottom: 56, left: 70 } }
 };
 
 const AXIS_TEXT = '#8b94a6';
 const GRID = '#eef0f5';
-const BASELINE = '#d7dce5';
+const BASELINE = '#d5dae4';
 const GUIDE = '#10233f';
 
-export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = 'money' }) {
+export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = 'money', variant = 'wide' }) {
   const allSeries = seriesOf(chart);
   // Series the reader has hidden. Hiding rescales the chart, which is the point:
   // a small series is unreadable beside a large one until the large one is off.
   const [hidden, setHidden] = useState(() => new Set());
   const [hover, setHover] = useState(null);
 
+  const view = SHAPE[variant] ?? SHAPE.wide;
+  const plot = {
+    width: view.width - view.pad.left - view.pad.right,
+    height: view.height - view.pad.top - view.pad.bottom
+  };
+
   const series = allSeries.filter((entry) => !hidden.has(entry.key));
   const points = chart.points ?? [];
 
   const valueOf = (point, key) => Number(point[key] ?? 0);
   const maxValue = Math.max(0, ...points.flatMap((point) => series.map((entry) => valueOf(point, entry.key))));
-  const { max, ticks } = niceScale(maxValue);
+  // A narrow card has room for fewer gridlines before they crowd.
+  const { max, ticks } = niceScale(maxValue, variant === 'compact' ? 3 : 4);
 
   /*
    * Bars sit in the middle of a band; a line's points sit on the edges, so its
    * first and last point touch the axis ends instead of floating inside them.
    */
-  const band = PLOT.width / Math.max(points.length, 1);
+  const band = plot.width / Math.max(points.length, 1);
   const xFor = (index) =>
     type === 'line'
       ? points.length === 1
-        ? PLOT.width / 2
-        : (index * PLOT.width) / (points.length - 1)
+        ? plot.width / 2
+        : (index * plot.width) / (points.length - 1)
       : band * index + band / 2;
 
   /*
@@ -65,21 +75,22 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
    */
   const hitBand = (index) => {
     const left = index === 0 ? 0 : (xFor(index - 1) + xFor(index)) / 2;
-    const right = index === points.length - 1 ? PLOT.width : (xFor(index) + xFor(index + 1)) / 2;
+    const right = index === points.length - 1 ? plot.width : (xFor(index) + xFor(index + 1)) / 2;
     return { x: left, width: Math.max(right - left, 0) };
   };
 
-  const yFor = (value) => PLOT.height - (value / max) * PLOT.height;
-  const keepLabel = thinLabels(points.length);
+  const yFor = (value) => plot.height - (value / max) * plot.height;
+  const keepLabel = thinLabels(points.length, variant === 'compact' ? 7 : 12);
 
   // A gap between bars, a gap between groups, and a floor so a long daily series
   // still draws something visible.
-  const groupWidth = Math.min(band * 0.68, 30 * series.length);
+  const groupWidth = Math.min(band * 0.66, (variant === 'compact' ? 22 : 30) * series.length);
   const barWidth = Math.max(1.5, groupWidth / Math.max(series.length, 1));
 
   const format = (value) => (valueKind === 'count' ? String(value) : exactInr(value));
   const axisFormat = (value) => (valueKind === 'count' ? String(Math.round(value)) : compactInr(value));
   const dense = points.length > 60;
+  const fontSize = variant === 'compact' ? 13 : 12;
 
   const toggle = (key) =>
     setHidden((current) => {
@@ -121,21 +132,28 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
 
       <div className="position-relative">
         <svg
-          viewBox={`0 0 ${VIEW.width} ${VIEW.height}`}
+          viewBox={`0 0 ${view.width} ${view.height}`}
           preserveAspectRatio="xMidYMid meet"
           style={{ width: '100%', height: 'auto', display: 'block' }}
           role="img"
           aria-label={`${chart.title}: ${type} chart of ${points.length} points`}
         >
-          <g transform={`translate(${PAD.left},${PAD.top})`}>
+          <g transform={`translate(${view.pad.left},${view.pad.top})`}>
             {/* Gridlines and the value axis. The zero line is the baseline, so it
                 is drawn once, below, rather than twice. */}
             {ticks.map((tick) => (
               <g key={tick}>
                 {tick > 0 ? (
-                  <line x1={0} x2={PLOT.width} y1={yFor(tick)} y2={yFor(tick)} stroke={GRID} strokeWidth={1} />
+                  <line x1={0} x2={plot.width} y1={yFor(tick)} y2={yFor(tick)} stroke={GRID} strokeWidth={1} />
                 ) : null}
-                <text x={-12} y={yFor(tick)} textAnchor="end" dominantBaseline="middle" fontSize={12} fill={AXIS_TEXT}>
+                <text
+                  x={-10}
+                  y={yFor(tick)}
+                  textAnchor="end"
+                  dominantBaseline="middle"
+                  fontSize={fontSize}
+                  fill={AXIS_TEXT}
+                >
                   {axisFormat(tick)}
                 </text>
               </g>
@@ -143,7 +161,7 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
 
             {/* The hovered column, behind the marks so it never hides them. */}
             {hover ? (
-              <rect {...hitBand(hover.index)} y={0} height={PLOT.height} fill={GUIDE} opacity={0.04} />
+              <rect {...hitBand(hover.index)} y={0} height={plot.height} fill={GUIDE} opacity={0.04} />
             ) : null}
 
             {/* Marks */}
@@ -185,13 +203,13 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
               : points.map((point, index) =>
                   series.map((entry, seriesIndex) => {
                     const value = valueOf(point, entry.key);
-                    const height = Math.max(value > 0 ? 1 : 0, PLOT.height - yFor(value));
+                    const height = Math.max(value > 0 ? 1 : 0, plot.height - yFor(value));
                     const x = xFor(index) - groupWidth / 2 + seriesIndex * barWidth;
                     return (
                       <rect
                         key={`${point.label}-${entry.key}`}
                         x={x}
-                        y={PLOT.height - height}
+                        y={plot.height - height}
                         width={Math.max(barWidth - (series.length > 1 ? 1 : 0), 1)}
                         height={height}
                         fill={colorFor(allSeries.indexOf(entry))}
@@ -203,18 +221,18 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
                 )}
 
             {/* Category axis */}
-            <line x1={0} x2={PLOT.width} y1={PLOT.height} y2={PLOT.height} stroke={BASELINE} strokeWidth={1} />
+            <line x1={0} x2={plot.width} y1={plot.height} y2={plot.height} stroke={BASELINE} strokeWidth={1} />
             {points.map((point, index) =>
               keepLabel(index) ? (
                 <text
                   key={point.label}
                   x={xFor(index)}
-                  y={PLOT.height + 16}
+                  y={plot.height + 16}
                   textAnchor="end"
-                  fontSize={12}
+                  fontSize={fontSize}
                   fill={hover?.index === index ? GUIDE : AXIS_TEXT}
                   fontWeight={hover?.index === index ? 600 : 400}
-                  transform={`rotate(-38 ${xFor(index)} ${PLOT.height + 16})`}
+                  transform={`rotate(-38 ${xFor(index)} ${plot.height + 16})`}
                 >
                   {shortLabel(point.label, bucket)}
                 </text>
@@ -231,7 +249,7 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
                 key={`hit-${point.label}`}
                 {...hitBand(index)}
                 y={0}
-                height={PLOT.height}
+                height={plot.height}
                 fill="transparent"
                 onMouseEnter={() => setHover({ point, index })}
                 onMouseLeave={() => setHover(null)}
@@ -254,7 +272,7 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
               // Positioned as a percentage of the plot area, so the tooltip
               // follows the hovered column at any rendered width. It flips side
               // past the midpoint so it cannot be clipped by the card edge.
-              left: `${((PAD.left + xFor(hover.index)) / VIEW.width) * 100}%`,
+              left: `${((view.pad.left + xFor(hover.index)) / view.width) * 100}%`,
               top: 0,
               transform: hover.index > points.length / 2 ? 'translate(calc(-100% - 10px), 0)' : 'translate(10px, 0)'
             }}

@@ -6,10 +6,18 @@
  * no arithmetic and no formatting of its own, so a card can never disagree with
  * the ledger.
  *
- * Cards share one height through `h-100` on a Bootstrap row, so two cards and
- * four cards both line up; the number is the largest thing in the card, and a
- * long INR figure wraps inside it rather than widening it.
+ * The grid is chosen from how many cards there actually are, so a two-card
+ * section fills the row with two halves rather than leaving two quarter-width
+ * gaps, and a four-card section goes four across and then folds to two and one.
  */
+
+/** Four across when there are four, and an even split when there are fewer. */
+const COLUMN_CLASS = {
+  1: 'col-12',
+  2: 'col-12 col-sm-6',
+  3: 'col-12 col-sm-6 col-xl-4',
+  4: 'col-6 col-xl-3'
+};
 
 export default function AnalyticsMetricCards({ tiles = [], loading }) {
   if (tiles.length === 0 && !loading) return null;
@@ -19,15 +27,13 @@ export default function AnalyticsMetricCards({ tiles = [], loading }) {
     // the charts below jump up and then back down.
     return (
       <div className="row g-3">
-        {[0, 1, 2].map((index) => (
-          <div className="col-6 col-lg-3" key={index}>
+        {[0, 1, 2, 3].map((index) => (
+          <div className="col-6 col-xl-3" key={index}>
             <div className="lms-analytics-surface lms-analytics-metric">
               <span className="lms-analytics-metric-icon bg-body-secondary" aria-hidden="true" />
-              <div className="min-w-0 w-100">
-                <div className="placeholder-glow">
-                  <span className="placeholder col-7" />
-                  <span className="placeholder col-10 mt-2" style={{ height: '1.25rem' }} />
-                </div>
+              <div className="min-w-0 w-100 placeholder-glow">
+                <span className="placeholder col-7" />
+                <span className="placeholder col-10 mt-2 d-block" style={{ height: '1.25rem' }} />
               </div>
             </div>
           </div>
@@ -36,12 +42,12 @@ export default function AnalyticsMetricCards({ tiles = [], loading }) {
     );
   }
 
+  const columns = COLUMN_CLASS[tiles.length] ?? 'col-6 col-xl-3';
+
   return (
     <div className="row g-3">
       {tiles.map((tile) => (
-        // Two per row on a phone, four on a laptop; never a single orphan on its
-        // own row for the two-card sections.
-        <div className={tiles.length <= 2 ? 'col-12 col-sm-6' : 'col-6 col-lg-3'} key={tile.key}>
+        <div className={columns} key={tile.key}>
           <div className="lms-analytics-surface lms-analytics-metric">
             <span
               className={`lms-analytics-metric-icon bg-${tile.accent ?? 'primary'}-subtle text-${tile.accent ?? 'primary'}`}

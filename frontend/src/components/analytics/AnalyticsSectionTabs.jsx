@@ -25,13 +25,16 @@ export default function AnalyticsSectionTabs({ sections, active, loading, onSele
               // Both the style hook and the announcement, from one attribute.
               aria-current={isActive ? 'page' : undefined}
               className="lms-analytics-tab"
+              // The label can be clipped once six tabs share the bar, so the
+              // full name is always available on hover and to a screen reader.
+              title={section.label}
               onClick={() => onSelect(section.key)}
               // The active tab stays enabled while loading, so the strip does not
               // lose its selection to a disabled state mid-request.
               disabled={loading && !isActive}
             >
               <i className={`bi ${isActive ? 'bi-check-lg' : section.icon}`} aria-hidden="true" />
-              {section.label}
+              <span className="text-truncate">{section.label}</span>
             </button>
           );
         })}

@@ -60,27 +60,17 @@ export default function AnalyticsHeader({
         </div>
 
         <div className="d-flex flex-wrap gap-2">
-          <button
-            type="button"
-            className="btn btn-outline-secondary btn-sm d-inline-flex align-items-center gap-1"
-            onClick={onReset}
-            disabled={loading}
-          >
+          <button type="button" className="btn btn-outline-secondary lms-analytics-action" onClick={onReset} disabled={loading}>
             <i className="bi bi-arrow-counterclockwise" aria-hidden="true" />
             Reset
           </button>
-          <button
-            type="button"
-            className="btn btn-outline-secondary btn-sm d-inline-flex align-items-center gap-1"
-            onClick={onRefresh}
-            disabled={loading}
-          >
+          <button type="button" className="btn btn-outline-secondary lms-analytics-action" onClick={onRefresh} disabled={loading}>
             <i className="bi bi-arrow-clockwise" aria-hidden="true" />
             Refresh
           </button>
           <button
             type="button"
-            className="btn btn-primary btn-sm d-inline-flex align-items-center gap-1"
+            className="btn btn-primary lms-analytics-action"
             onClick={onApply}
             disabled={loading || !dirty}
             // Spelled out, because a disabled button that says only "Apply"
@@ -93,7 +83,7 @@ export default function AnalyticsHeader({
           {canExport ? (
             <button
               type="button"
-              className="btn btn-success btn-sm d-inline-flex align-items-center gap-1"
+              className="btn btn-success lms-analytics-action"
               onClick={handleExport}
               disabled={exporting || loading}
             >
@@ -122,15 +112,21 @@ export default function AnalyticsHeader({
         <div className="lms-analytics-chips mb-3" aria-label="Applied filters">
           <span className="small text-secondary me-1">Showing</span>
           {chips.map((chip) => (
-            <span className="lms-analytics-chip" key={chip.key} title={`${chip.label}: ${chip.value}`}>
-              {chip.icon ? <i className={`bi ${chip.icon}`} aria-hidden="true" /> : null}
-              <span className="lms-analytics-chip-key">{chip.label}</span>
+            <span className="lms-analytics-chip" key={chip.key} title={`${chip.label || 'Showing'}: ${chip.value}`}>
+              {chip.icon ? (
+                <span className="lms-analytics-chip-icon" aria-hidden="true">
+                  <i className={`bi ${chip.icon}`} />
+                </span>
+              ) : null}
+              {chip.label ? <span className="lms-analytics-chip-key">{chip.label}</span> : null}
               <span className="lms-analytics-chip-value">{chip.value}</span>
             </span>
           ))}
           {typeof pointCount === 'number' ? (
             <span className="lms-analytics-chip" title="Chart points behind this view, and the rows an export writes">
-              <i className="bi bi-graph-up" aria-hidden="true" />
+              <span className="lms-analytics-chip-icon" aria-hidden="true">
+                <i className="bi bi-graph-up" />
+              </span>
               <span className="lms-analytics-chip-value">{pointCount}</span>
               <span className="lms-analytics-chip-key">points</span>
             </span>

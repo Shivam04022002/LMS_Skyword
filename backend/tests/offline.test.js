@@ -13457,6 +13457,146 @@ async function runRules(rules, source) {
       })(),
       'derived from the existing tables'
     );
+
+      /* ---- the dashboard layout rules ---- */
+
+      /*
+       * The redesign's substance, as opposed to its colours: a filter panel that
+       * does not reserve space for filters a section does not show, and chart
+       * cards that are not stretched into letterboxes on a wide screen.
+       */
+
+      const analyticsFiltersSource = stripComments(
+        fs.readFileSync(
+          path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'analytics', 'AnalyticsFilters.jsx'),
+          'utf8'
+        )
+      );
+      const analyticsCardsSource = stripComments(
+        fs.readFileSync(
+          path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'analytics', 'AnalyticsMetricCards.jsx'),
+          'utf8'
+        )
+      );
+      const analyticsTabsSource = stripComments(
+        fs.readFileSync(
+          path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'analytics', 'AnalyticsSectionTabs.jsx'),
+          'utf8'
+        )
+      );
+      const themeSource = fs.readFileSync(
+        path.resolve(__dirname, '..', '..', 'frontend', 'src', 'assets', 'styles', 'theme.css'),
+        'utf8'
+      );
+
+      record(
+        'Graph & Analytics',
+        'NO DEAD SPACE: a filter group is weighted by its field count, and an empty group is not rendered',
+        // The groups are built from the fields that survived the section filter...
+        /\.filter\(\(group\) => group\.fields\.length > 0\)/.test(analyticsFiltersSource) &&
+          // ...and each one flexes in proportion to how many it holds.
+          /'--lms-group-weight': group\.fields\.length/.test(analyticsFiltersSource) &&
+          /flex: var\(--lms-group-weight, 1\) 1 var\(--lms-group-basis, 14rem\)/.test(themeSource) &&
+          // No fixed column class is used for a group any more.
+          !/col-6 col-md-4 col-xl-3/.test(analyticsFiltersSource),
+        'one field cannot claim the width of four'
+      );
+
+      record(
+        'Graph & Analytics',
+        'NO LETTERBOX: a series gets the full width only when it has the points to fill it',
+        /const WIDE_SERIES_POINTS = 10;/.test(graphPageSource) &&
+          /chart\.kind === 'series' && \(chart\.points\?\.length \?\? 0\) >= WIDE_SERIES_POINTS/.test(graphPageSource) &&
+          /\? \{ className: 'col-12', variant: 'wide' \} : \{ className: 'col-12 col-xl-6', variant: 'compact' \}/.test(
+            graphPageSource
+          ),
+        'a three-point series sits two to a row instead of stretching across the page'
+      );
+
+      record(
+        'Graph & Analytics',
+        'the two card widths get different chart proportions, so neither is a strip',
+        (() => {
+          const shape = seriesChartSource.slice(
+            seriesChartSource.indexOf('const SHAPE = {'),
+            seriesChartSource.indexOf('const AXIS_TEXT')
+          );
+          const wide = /wide: \{ width: (\d+), height: (\d+)/.exec(shape);
+          const compact = /compact: \{ width: (\d+), height: (\d+)/.exec(shape);
+          if (!wide || !compact) return false;
+          const ratio = (m) => Number(m[1]) / Number(m[2]);
+          // A wide card is roughly 3:1; a half-width one is much squarer.
+          return ratio(wide) > 2.5 && ratio(compact) < 2 && /variant = 'wide'/.test(seriesChartSource);
+        })(),
+        'wide ~3:1, compact ~5:3'
+      );
+
+      record(
+        'Graph & Analytics',
+        'metric cards choose their grid from how many there are, so a row is never half empty',
+        /const COLUMN_CLASS = \{/.test(analyticsCardsSource) &&
+          /2: 'col-12 col-sm-6'/.test(analyticsCardsSource) &&
+          /4: 'col-6 col-xl-3'/.test(analyticsCardsSource),
+        'two halves, three thirds, four quarters'
+      );
+
+      record(
+        'Graph & Analytics',
+        'the six tabs share the bar once there is room, and scroll before they shrink',
+        /@media \(min-width: 992px\) \{\s*\.lms-analytics-tab \{\s*flex: 1 1 0;/.test(themeSource.replace(/\r/g, '')) &&
+          /overflow-x: auto/.test(themeSource) &&
+          // A clipped label stays reachable by hover and by assistive tech.
+          /title=\{section\.label\}/.test(analyticsTabsSource),
+        'flex on desktop, scroll on mobile, full label always available'
+      );
+
+      record(
+        'Graph & Analytics',
+        'a chart card is a column with a growing body, so two side by side finish level',
+        /lms-analytics-chart-body/.test(chartCardSource) &&
+          /\.lms-analytics-chart \{[^}]*flex-direction: column;[^}]*height: 100%;/.test(themeSource.replace(/\r?\n/g, ' ')) &&
+          /\.lms-analytics-chart-body \{[^}]*flex: 1 1 auto;/.test(themeSource.replace(/\r?\n/g, ' ')),
+        'equal heights without a fixed height'
+      );
+
+      record(
+        'Graph & Analytics',
+        'a chart card can carry a description, and the backend’s own caveat outranks it',
+        /const note = chart\?\.note \?\? description;/.test(chartCardSource) &&
+          /const CHART_DESCRIPTION = \{/.test(graphPageSource) &&
+          // Descriptions are presentational: none of them is computed.
+          !/CHART_DESCRIPTION\[[^\]]+\]\s*\(/.test(graphPageSource),
+        'note wins, description fills the gap'
+      );
+
+      record(
+        'Graph & Analytics',
+        'financial figures use tabular numerals, so columns of rupees line up',
+        /\.lms-analytics-page \{[^}]*font-variant-numeric: tabular-nums;/.test(themeSource.replace(/\r?\n/g, ' ')),
+        'set once on the page, inherited by every figure in it'
+      );
+
+      record(
+        'Graph & Analytics',
+        'STILL SCOPED: every new rule is namespaced and the shell styles are untouched',
+        (() => {
+          const marker = themeSource.indexOf('/* ---------- Graph & Analytics ----------');
+          const before = themeSource.slice(0, marker);
+          const block = themeSource.slice(marker);
+          // Nothing analytics-related outside the block...
+          const selectors = [...block.matchAll(/^\.([a-z-]+)/gm)].map((m) => m[1]);
+          return (
+            marker > 0 &&
+            !before.includes('lms-analytics') &&
+            selectors.every((name) => name.startsWith('lms-analytics-')) &&
+            // ...and every shell rule the other pages depend on still exists.
+            ['lms-shell', 'lms-header', 'lms-sidebar', 'lms-nav-link', 'lms-stat-icon', 'lms-kpi-value', 'lms-receipt-sheet'].every(
+              (name) => before.includes(`.${name}`)
+            )
+          );
+        })(),
+        'one namespaced block at the tail; no other page can be affected'
+      );
   }
 
   // ---------- Report ----------

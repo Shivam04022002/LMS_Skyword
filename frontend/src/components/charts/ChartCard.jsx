@@ -4,9 +4,12 @@ import SeriesChart from './SeriesChart';
 import { isEmptyChart, seriesOf } from './chartUtils';
 
 /*
- * One chart in a card: its title, whatever caveat the backend attached to it,
+ * One chart in a card: its title, a short description of what the chart shows,
  * the chart-type switch where more than one type is honest for that data, and
  * the loading / empty / error states.
+ *
+ * The card is a column with the plot in a growing middle, so two cards sitting
+ * side by side finish the same height whatever their headers do.
  *
  * A pie is offered only for a single-measure category chart. A date series is
  * never a pie — a share of consecutive periods is not a meaningful reading — and
@@ -17,7 +20,16 @@ import { isEmptyChart, seriesOf } from './chartUtils';
 const TYPE_ICON = { bar: 'bi-bar-chart-fill', line: 'bi-graph-up', pie: 'bi-pie-chart-fill' };
 const TYPE_LABEL = { bar: 'Bar chart', line: 'Line chart', pie: 'Donut chart' };
 
-export default function ChartCard({ chart, bucket, loading, error, valueKind = 'money', defaultType = 'bar' }) {
+export default function ChartCard({
+  chart,
+  bucket,
+  loading,
+  error,
+  valueKind = 'money',
+  defaultType = 'bar',
+  description,
+  variant = 'wide'
+}) {
   const [type, setType] = useState(defaultType);
 
   const isSeries = chart?.kind === 'series';
@@ -28,13 +40,16 @@ export default function ChartCard({ chart, bucket, loading, error, valueKind = '
   const effectiveType = available.includes(type) ? type : available[0];
 
   const empty = chart ? isEmptyChart(chart) : true;
+  // The backend's own caveat wins: it explains something about the figures, and
+  // the page's description only says what the chart plots.
+  const note = chart?.note ?? description;
 
   return (
-    <section className="lms-analytics-surface p-3 p-md-4 h-100">
+    <section className="lms-analytics-surface lms-analytics-chart">
       <div className="lms-analytics-chart-head">
         <div className="min-w-0">
           <h2 className="lms-analytics-chart-title">{chart?.title ?? 'Chart'}</h2>
-          {chart?.note ? <p className="lms-analytics-chart-note">{chart.note}</p> : null}
+          {note ? <p className="lms-analytics-chart-note">{note}</p> : null}
         </div>
 
         {available.length > 1 && !loading && !error && !empty ? (
@@ -56,32 +71,34 @@ export default function ChartCard({ chart, bucket, loading, error, valueKind = '
         ) : null}
       </div>
 
-      {error ? (
-        <div className="alert alert-danger mb-0 d-flex align-items-start gap-2 py-2 px-3 small" role="alert">
-          <i className="bi bi-exclamation-triangle-fill mt-1" aria-hidden="true" />
-          <div>{error}</div>
-        </div>
-      ) : loading ? (
-        <div className="lms-analytics-placeholder">
-          <span className="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true" />
-          <p className="mb-0 mt-2 small">Loading {chart?.title?.toLowerCase() ?? 'chart'}…</p>
-        </div>
-      ) : empty ? (
-        /*
-          An empty dataset says so. It deliberately does not draw a flat line
-          along zero: that reads as "we measured zero every day", which is a
-          different claim from "there is nothing here to measure".
-        */
-        <div className="lms-analytics-placeholder">
-          <i className="bi bi-inbox lms-analytics-placeholder-icon" aria-hidden="true" />
-          <p className="mb-0">No data in this period for these filters.</p>
-          <p className="small mb-0 text-body-tertiary">Nothing is charted rather than drawing a zero trend.</p>
-        </div>
-      ) : effectiveType === 'pie' ? (
-        <PieChart chart={chart} valueKind={valueKind} />
-      ) : (
-        <SeriesChart chart={chart} bucket={bucket} type={effectiveType} valueKind={valueKind} />
-      )}
+      <div className="lms-analytics-chart-body">
+        {error ? (
+          <div className="alert alert-danger mb-0 d-flex align-items-start gap-2 py-2 px-3 small" role="alert">
+            <i className="bi bi-exclamation-triangle-fill mt-1" aria-hidden="true" />
+            <div>{error}</div>
+          </div>
+        ) : loading ? (
+          <div className="lms-analytics-placeholder">
+            <span className="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true" />
+            <p className="mb-0 mt-2 small">Loading {chart?.title?.toLowerCase() ?? 'chart'}…</p>
+          </div>
+        ) : empty ? (
+          /*
+            An empty dataset says so. It deliberately does not draw a flat line
+            along zero: that reads as "we measured zero every day", which is a
+            different claim from "there is nothing here to measure".
+          */
+          <div className="lms-analytics-placeholder">
+            <i className="bi bi-inbox lms-analytics-placeholder-icon" aria-hidden="true" />
+            <p className="mb-0">No data in this period for these filters.</p>
+            <p className="small mb-0 text-body-tertiary">Nothing is charted rather than drawing a zero trend.</p>
+          </div>
+        ) : effectiveType === 'pie' ? (
+          <PieChart chart={chart} valueKind={valueKind} />
+        ) : (
+          <SeriesChart chart={chart} bucket={bucket} type={effectiveType} valueKind={valueKind} variant={variant} />
+        )}
+      </div>
     </section>
   );
 }

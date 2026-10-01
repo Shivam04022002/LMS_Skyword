@@ -16,8 +16,8 @@ import { colorFor, exactInr } from './chartUtils';
  */
 
 const SIZE = 220;
-const RADIUS = 96;
-const INNER = 62;
+const RADIUS = 98;
+const INNER = 68;
 const CENTRE = SIZE / 2;
 
 /** A point on the circle, at `angle` turns clockwise from twelve o'clock. */
@@ -76,8 +76,8 @@ export default function PieChart({ chart, valueKind = 'money' }) {
   });
 
   return (
-    <div className="row g-3 align-items-center">
-      <div className="col-12 col-sm-auto">
+    <div className="row g-3 align-items-center justify-content-center">
+      <div className="col-12 col-sm-auto" style={{ maxWidth: `${SIZE + 16}px` }}>
         <svg
           viewBox={`0 0 ${SIZE} ${SIZE}`}
           style={{ width: '100%', maxWidth: `${SIZE}px`, height: 'auto', display: 'block', margin: '0 auto' }}
@@ -104,10 +104,18 @@ export default function PieChart({ chart, valueKind = 'money' }) {
               />
             ))}
           {/* The hub reads as the total, or as the hovered slice's share. */}
-          <text x={CENTRE} y={CENTRE - 7} textAnchor="middle" fontSize={11} fill="#8b94a6">
+          <text x={CENTRE} y={CENTRE - 8} textAnchor="middle" fontSize={10.5} fill="#8b94a6">
             {hover ? hover.label : 'Total'}
           </text>
-          <text x={CENTRE} y={CENTRE + 12} textAnchor="middle" fontSize={hover ? 18 : 14} fontWeight="700" fill="#111827">
+          <text
+            x={CENTRE}
+            y={CENTRE + 11}
+            textAnchor="middle"
+            /* A long INR total needs a smaller face than a two-digit share. */
+            fontSize={hover ? 19 : Math.max(10, Math.min(15, 150 / Math.max(format(total).length, 1)))}
+            fontWeight="700"
+            fill="#111827"
+          >
             {hover ? `${(hover.share * 100).toFixed(1)}%` : format(total)}
           </text>
         </svg>
