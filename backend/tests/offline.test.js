@@ -9597,6 +9597,161 @@ async function runRules(rules, source) {
         'the frontend preview is never trusted'
       );
 
+      /* ---- Large allocations, and the preview telling the truth about them ---- */
+
+      /*
+       * One payment can settle every remaining instalment of a long daily loan,
+       * so a planned allocation list runs past 100. Two things had to be true
+       * for that to work: the cap on a SERVER-PLANNED list is not the cap on a
+       * CLIENT-SUPPLIED one, and a row that will be refused has to be refused
+       * in the preview rather than at commit time on a summary that had just
+       * called every row valid.
+       */
+
+      const collectionsConfigSource = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'config', 'collections.js'), 'utf8')
+      );
+      const collectionServiceForLimits = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionService.js'), 'utf8')
+      );
+      const collectionImportForLimits = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'collectionImportService.js'), 'utf8')
+      );
+      const collectionValidatorForLimits = stripComments(
+        fs.readFileSync(path.resolve(__dirname, '..', 'src', 'validators', 'collectionValidator.js'), 'utf8')
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'THE CEILING IS DERIVED, NOT PICKED: a planned list is capped at the most instalments a loan can have',
+        (() => {
+          const { MAX_ALLOCATIONS_PER_COLLECTION, MAX_PLANNED_ALLOCATIONS_PER_COLLECTION } = require('../src/config/collections');
+          const { TENURE_MAX, COLLECTION_COUNT_MAX } = require('../src/config/loans');
+          return (
+            MAX_PLANNED_ALLOCATIONS_PER_COLLECTION === TENURE_MAX &&
+            // Both ways of stating a schedule's length are bound by the same
+            // number, which is what makes TENURE_MAX the real ceiling.
+            COLLECTION_COUNT_MAX === TENURE_MAX &&
+            MAX_ALLOCATIONS_PER_COLLECTION === 100 &&
+            /const MAX_PLANNED_ALLOCATIONS_PER_COLLECTION = TENURE_MAX;/.test(collectionsConfigSource)
+          );
+        })(),
+        'planned = TENURE_MAX = 3650; client-supplied stays 100'
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'NOT WEAKENED: the cap is still always applied, and the default is still the client limit',
+        /function assertAllocationShape\(allocations, \{ maxAllocations = MAX_ALLOCATIONS_PER_COLLECTION \} = \{\}\)/.test(
+          allocationSourceForAdvance
+        ) &&
+          /if \(allocations\.length > maxAllocations\) \{/.test(allocationSourceForAdvance) &&
+          /maxAllocations = MAX_ALLOCATIONS_PER_COLLECTION\r?\n\}\) \{/.test(allocationSourceForAdvance) &&
+          /const allocatedTotal = assertAllocationShape\(allocations, \{ maxAllocations \}\);/.test(allocationSourceForAdvance),
+        'no branch skips the check; only the number is a parameter'
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'UNCHANGED FOR EVERYONE ELSE: the manual post and the permanent import still take the 100 limit',
+        // createCollectionRecord defaults it, so a caller that says nothing gets
+        // the old behaviour...
+        /async function createCollectionRecord\(payload, actor, transaction, \{ asOf = today\(\), maxAllocations = MAX_ALLOCATIONS_PER_COLLECTION \} = \{\}\) \{/.test(
+          collectionServiceForLimits
+        ) &&
+          // ...and neither the permanent import nor the validator mentions it.
+          !/maxAllocations/.test(collectionImportForLimits) &&
+          /isArray\(\{ min: 1, max: MAX_ALLOCATIONS_PER_COLLECTION \}\)/.test(collectionValidatorForLimits) &&
+          !/MAX_PLANNED_ALLOCATIONS_PER_COLLECTION/.test(collectionValidatorForLimits) &&
+          !/MAX_PLANNED_ALLOCATIONS_PER_COLLECTION/.test(collectionImportForLimits),
+        'request bodies are bound exactly as before'
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'only oneBulk raises it, and only for the list it planned itself',
+        /const \{ COLLECTION_STATUS, MAX_PLANNED_ALLOCATIONS_PER_COLLECTION \} = require\('\.\.\/config\/collections'\);/.test(
+          oneBulkSource
+        ) &&
+          /\{ asOf, maxAllocations: MAX_PLANNED_ALLOCATIONS_PER_COLLECTION \}/.test(oneBulkSource),
+        'passed at the one call site that posts a planned allocation'
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'THE PREVIEW MISMATCH: an over-long plan is refused during evaluation, so the row counts as invalid',
+        // In evaluateRows, beside the unallocated check - not discovered later
+        // inside the transaction.
+        /\} else if \(plan\.length > MAX_PLANNED_ALLOCATIONS_PER_COLLECTION\) \{/.test(oneBulkSource) &&
+          oneBulkSource.indexOf('} else if (plan.length > MAX_PLANNED_ALLOCATIONS_PER_COLLECTION) {') <
+            oneBulkSource.indexOf('async function runImport') &&
+          // and it reports the row's own numbers, not just a limit
+          /\$\{plan\.length\} instalments, and one collection can allocate/.test(oneBulkSource) &&
+          /loan \$\{loan\?\.loanNumber \?\? row\.values\.loanNumber\}/.test(oneBulkSource) &&
+          /This payment of \$\{payload\.amount\}/.test(oneBulkSource),
+        'row, loan, amount and allocation count all named'
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'every invalid row is counted: the summary is built from the row statuses themselves',
+        (() => {
+          const start = oneBulkSource.indexOf('function summarise(');
+          const summarise = oneBulkSource.slice(start, oneBulkSource.indexOf('}', oneBulkSource.indexOf('validAmount', start)));
+          return (
+            /ROW_STATUS\.VALID/.test(summarise) &&
+            /ROW_STATUS\.INVALID/.test(summarise) &&
+            /ROW_STATUS\.DUPLICATE/.test(summarise) &&
+            // and a row is INVALID whenever it collected any error at all
+            /status: errors\.length === 0 \? ROW_STATUS\.VALID : duplicate \? ROW_STATUS\.DUPLICATE : ROW_STATUS\.INVALID/.test(
+              oneBulkSource
+            )
+          );
+        })(),
+        'no counter is maintained separately from the rows'
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'A BLOCKING ERROR STOPS POSTING, and the stale summary stops claiming the file is ready',
+        /const blocked = Boolean\(error\);/.test(oneBulkUiSource) &&
+          /const canImport = Boolean\(file\) && allValid && !busy && !result && !blocked;/.test(oneBulkUiSource) &&
+          // the "ready to post" line is behind the same flag as the button
+          /\{blocked\s*\?\s*'This preview is out of date/.test(oneBulkUiSource) &&
+          /allValid && !blocked \? 'alert-info' : 'alert-warning'/.test(oneBulkUiSource),
+        'one flag governs the button, the wording and the colour'
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'a previous error is cleared by choosing a new file AND by a preview that succeeds',
+        (() => {
+          const onFile = oneBulkUiSource.slice(
+            oneBulkUiSource.indexOf('const handleFile'),
+            oneBulkUiSource.indexOf('const handleImport')
+          );
+          // Cleared when the file is chosen, and again once the new preview lands.
+          return (
+            (onFile.match(/setError\(''\)/g) ?? []).length >= 2 &&
+            /setPreview\(response\.data\);\s*setError\(''\);/.test(onFile.replace(/\r?\n\s*/g, ' ').replace(/\s+/g, ' '))
+          );
+        })(),
+        'no error can outlive the file it belonged to'
+      );
+
+      record(
+        'Large allocations (oneBulk)',
+        'a long allocation list is capped in the DOM but never truncated in substance',
+        /const ALLOCATIONS_SHOWN = 20;/.test(oneBulkUiSource) &&
+          /slice\(0, ALLOCATIONS_SHOWN\)/.test(oneBulkUiSource) &&
+          // the full count is always stated, and the rest is one click away
+          /\{group\.allocations\.length\} instalment/.test(oneBulkUiSource) &&
+          /show all \$\{group\.allocations\.length\} instalments/.test(oneBulkUiSource) &&
+          /const toggleRow = \(rowNumber\) =>/.test(oneBulkUiSource) &&
+          (oneBulkUiSource.match(/slice\(0, ALLOCATIONS_SHOWN\)/g) ?? []).length === 2,
+        'preview and posted lists both bounded, both expandable'
+      );
+
       const migrationFiles = fs.readdirSync(path.resolve(__dirname, '..', 'migrations'));
       const bounceMigration = migrationFiles.find((file) => /bounce-amount/.test(file));
       const migrationSource = bounceMigration

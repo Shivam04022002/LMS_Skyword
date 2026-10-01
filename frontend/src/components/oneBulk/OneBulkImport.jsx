@@ -24,6 +24,15 @@ import { formatCurrency } from '../../utils/loanConstants';
 
 const MAX_PREVIEW_ROWS = 200;
 
+/*
+ * One payment can settle every remaining instalment of a long daily loan, so a
+ * single row's allocation list runs to hundreds of entries and a whole workbook
+ * to tens of thousands. Rendering them all at once is what would freeze the
+ * page, so each row shows this many and keeps the rest one click away — capped,
+ * never truncated: the count is always stated and every entry is reachable.
+ */
+const ALLOCATIONS_SHOWN = 20;
+
 const STATUS_BADGE = {
   VALID: 'text-bg-success',
   INVALID: 'text-bg-danger',
@@ -60,12 +69,23 @@ export default function OneBulkImport() {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  // Row numbers whose full allocation list the operator has asked to see.
+  const [expanded, setExpanded] = useState(() => new Set());
+
+  const toggleRow = (rowNumber) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(rowNumber)) next.delete(rowNumber);
+      else next.add(rowNumber);
+      return next;
+    });
 
   const reset = () => {
     setFile(null);
     setPreview(null);
     setResult(null);
     setError('');
+    setExpanded(new Set());
     if (inputRef.current) inputRef.current.value = '';
   };
 
@@ -84,15 +104,20 @@ export default function OneBulkImport() {
   const handleFile = async (event) => {
     const chosen = event.target.files?.[0] ?? null;
     setFile(chosen);
+    // A new file invalidates the previous preview AND its error, so neither can
+    // be read as belonging to this one.
     setPreview(null);
     setResult(null);
     setError('');
+    setExpanded(new Set());
     if (!chosen) return;
 
     setBusy('preview');
     try {
       const response = await previewOneBulkImport(chosen);
+      // A preview that succeeded clears any error still on screen.
       setPreview(response.data);
+      setError('');
     } catch (requestError) {
       setError(requestError.message || 'That file could not be read.');
       setPreview(null);
@@ -109,6 +134,7 @@ export default function OneBulkImport() {
       const response = await runOneBulkImport(file);
       setResult(response.data);
       setPreview(null);
+      setExpanded(new Set());
     } catch (requestError) {
       setError(requestError.message || 'The import could not be completed.');
     } finally {
@@ -119,7 +145,16 @@ export default function OneBulkImport() {
   const summary = preview?.summary ?? result?.summary ?? null;
   const rows = preview?.rows ?? result?.rows ?? [];
   const allValid = Boolean(summary) && summary.totalRows > 0 && summary.validRows === summary.totalRows;
-  const canImport = Boolean(file) && allValid && !busy && !result;
+  /*
+   * An error is blocking. The backend revalidates and re-plans everything at
+   * confirmation, so it can reject a workbook the preview passed — a row's
+   * allocation may no longer fit, or the ledger may have moved. When that
+   * happens the preview on screen is stale, and it must not keep claiming the
+   * file is ready: the summary says so, and the button stays down until a fresh
+   * file produces a fresh preview.
+   */
+  const blocked = Boolean(error);
+  const canImport = Boolean(file) && allValid && !busy && !result && !blocked;
 
   return (
     <div className="container-fluid px-0">
@@ -187,7 +222,7 @@ export default function OneBulkImport() {
           {busy === 'import' ? <Spinner label="Posting historical collections…" /> : null}
 
           {summary ? (
-            <div className={`alert mt-3 ${result ? 'alert-success' : allValid ? 'alert-info' : 'alert-warning'}`}>
+            <div className={`alert mt-3 ${result ? 'alert-success' : allValid && !blocked ? 'alert-info' : 'alert-warning'}`}>
               <div className="row g-2 small text-center">
                 <div className="col-6 col-md">
                   <div className="text-uppercase fw-semibold">Total rows</div>
@@ -213,9 +248,11 @@ export default function OneBulkImport() {
               {summary.blankRows > 0 ? <div className="small mt-2">{summary.blankRows} empty row(s) were ignored.</div> : null}
               {!result ? (
                 <div className="small mt-2">
-                  {allValid
-                    ? 'Nothing has been posted yet — this is a preview of where each payment will land.'
-                    : 'A oneBulk import is all or nothing. Fix the rows below and upload the file again; nothing will be posted until every row passes.'}
+                  {blocked
+                    ? 'This preview is out of date: the import was refused, and the reason is above. Nothing was posted. Fix the file and upload it again — the counts below described the file as it was read, not as it stands now.'
+                    : allValid
+                      ? 'Nothing has been posted yet — this is a preview of where each payment will land.'
+                      : 'A oneBulk import is all or nothing. Fix the rows below and upload the file again; nothing will be posted until every row passes.'}
                 </div>
               ) : (
                 <div className="small mt-2">
@@ -262,9 +299,21 @@ export default function OneBulkImport() {
                       </td>
                       <td className="text-end fw-semibold">{formatCurrency(collection.amount)}</td>
                       <td className="small">
-                        {collection.allocations
+                        {collection.allocations.length} instalment{collection.allocations.length === 1 ? '' : 's'}:{' '}
+                        {(expanded.has(collection.row) ? collection.allocations : collection.allocations.slice(0, ALLOCATIONS_SHOWN))
                           .map((allocation) => `EMI #${allocation.emiNumber} → ${formatCurrency(allocation.amount)}`)
                           .join(', ')}
+                        {collection.allocations.length > ALLOCATIONS_SHOWN ? (
+                          <button
+                            type="button"
+                            className="btn btn-link btn-sm p-0 ms-1 align-baseline"
+                            onClick={() => toggleRow(collection.row)}
+                          >
+                            {expanded.has(collection.row)
+                              ? 'show fewer'
+                              : `show all ${collection.allocations.length}`}
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
                   ))}
@@ -335,8 +384,14 @@ export default function OneBulkImport() {
                             const advance = advanceSummary(row);
                             return (
                               <div key={`${row.rowNumber}-${group.date}`} className="mb-1">
-                                <div className="fw-semibold">{formatCurrency(group.amount)} in total</div>
-                                {group.allocations.map((allocation) => (
+                                <div className="fw-semibold">
+                                  {formatCurrency(group.amount)} across {group.allocations.length} instalment
+                                  {group.allocations.length === 1 ? '' : 's'}
+                                </div>
+                                {(expanded.has(row.rowNumber)
+                                  ? group.allocations
+                                  : group.allocations.slice(0, ALLOCATIONS_SHOWN)
+                                ).map((allocation) => (
                                   <div key={`${row.rowNumber}-${group.date}-${allocation.emiId}`} className="text-secondary ps-2">
                                     EMI #{allocation.emiNumber} → {formatCurrency(allocation.amount)}
                                     <span className="ms-1">
@@ -351,6 +406,19 @@ export default function OneBulkImport() {
                                     </span>
                                   </div>
                                 ))}
+                                {group.allocations.length > ALLOCATIONS_SHOWN ? (
+                                  <div className="ps-2">
+                                    <button
+                                      type="button"
+                                      className="btn btn-link btn-sm p-0 align-baseline"
+                                      onClick={() => toggleRow(row.rowNumber)}
+                                    >
+                                      {expanded.has(row.rowNumber)
+                                        ? 'show fewer'
+                                        : `show all ${group.allocations.length} instalments`}
+                                    </button>
+                                  </div>
+                                ) : null}
                                 {advance ? (
                                   <div className="badge text-bg-info-subtle text-info-emphasis text-wrap mt-1">
                                     Advance payment: {formatCurrency(advance.amount)} → {advance.count} future EMI

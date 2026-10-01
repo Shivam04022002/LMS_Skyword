@@ -17,6 +17,7 @@ const allocationService = require('./collectionAllocationService');
 const { toPaise, fromPaise } = require('../utils/money');
 const { today, differenceInDays } = require('../utils/dates');
 const {
+  MAX_ALLOCATIONS_PER_COLLECTION,
   formatCollectionNumber,
   COLLECTION_STATUS,
   LEDGER_TYPES_REQUIRING_REFERENCE,
@@ -171,8 +172,14 @@ async function findCollectionOrFail(collectionId) {
  * number and the snapshot rebuild are the same code in both paths and cannot
  * drift apart. The transaction is the caller's, which is what lets an import
  * post a whole batch atomically.
+ *
+ * `maxAllocations` is how many instalments this one collection may allocate to.
+ * Left out, it is the request-shape limit, which is what every caller passing a
+ * client-supplied array wants and what all of them did before this option
+ * existed. A caller whose allocations the SERVER planned from the loan's own
+ * schedule passes the higher planned ceiling instead.
  */
-async function createCollectionRecord(payload, actor, transaction, { asOf = today() } = {}) {
+async function createCollectionRecord(payload, actor, transaction, { asOf = today(), maxAllocations = MAX_ALLOCATIONS_PER_COLLECTION } = {}) {
   const {
     loanId,
     customerId,
@@ -215,7 +222,11 @@ async function createCollectionRecord(payload, actor, transaction, { asOf = toda
     allocations,
     collectionAmount: fromPaise(emiPaise),
     loanId: loan.id,
-    transaction
+    transaction,
+    // Omitted by every caller that passes allocations from a request body, which
+    // therefore keeps the request-shape limit. Only a caller whose allocations
+    // the server planned raises it.
+    maxAllocations
   });
 
   const year = new Date().getFullYear();

@@ -62,7 +62,7 @@ const { today, differenceInDays } = require('../utils/dates');
 const { AUDIT_ACTIONS, AUDIT_ENTITIES } = require('../config/auditActions');
 const { isValidCifId } = require('../config/customers');
 const { LOAN_STATUS } = require('../config/loans');
-const { COLLECTION_STATUS } = require('../config/collections');
+const { COLLECTION_STATUS, MAX_PLANNED_ALLOCATIONS_PER_COLLECTION } = require('../config/collections');
 const { PARTY_STATUS } = require('../config/loanParties');
 const { EMI_STATUS } = require('../config/emis');
 const {
@@ -362,6 +362,24 @@ async function evaluateRows(rows, { asOf = today() } = {}) {
                   toPaise(payload.amount) - toPaise(unallocated)
                 )} of it is still outstanding at this point in the payment history`
         });
+      } else if (plan.length > MAX_PLANNED_ALLOCATIONS_PER_COLLECTION) {
+        /*
+         * A collection's allocation list is capped, and this row's plan is over
+         * it. Caught HERE so the row is counted INVALID in the preview and the
+         * operator is told which row, which loan and how many instalments —
+         * rather than the whole import failing at commit time on a summary that
+         * had just declared every row valid.
+         *
+         * The plan is kept on the row so the preview can still show it.
+         */
+        allocation = plan;
+        errors.push({
+          field: 'amount',
+          reason:
+            `This payment of ${payload.amount} on loan ${loan?.loanNumber ?? row.values.loanNumber} settles ` +
+            `${plan.length} instalments, and one collection can allocate to at most ` +
+            `${MAX_PLANNED_ALLOCATIONS_PER_COLLECTION}. Split the amount across separate rows.`
+        });
       } else {
         allocation = plan;
 
@@ -580,7 +598,11 @@ async function runImport(buffer, actor, context, { filename, asOf = today() } = 
           },
           actor,
           transaction,
-          { asOf }
+          // These allocations were planned here, from the loan's own schedule —
+          // no caller chose their number — so they take the planned ceiling
+          // rather than the request-shape limit. The check itself is unchanged
+          // and still runs inside createCollectionRecord.
+          { asOf, maxAllocations: MAX_PLANNED_ALLOCATIONS_PER_COLLECTION }
         );
 
         collections.push({ collection, plan: group.entries, rowNumber: row.rowNumber, dateSource: group.source });

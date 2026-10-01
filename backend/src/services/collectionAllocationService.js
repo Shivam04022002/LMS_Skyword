@@ -79,14 +79,22 @@ function outstandingPaise(emi, collectedPaise) {
  * responsible only for locking and for feeding them the current balances.
  */
 
-/** Rejects duplicates and non-positive amounts. Returns the total in paise. */
-function assertAllocationShape(allocations) {
+/**
+ * Rejects duplicates and non-positive amounts. Returns the total in paise.
+ *
+ * `maxAllocations` defaults to the request-shape limit, so every caller that
+ * passes a client-supplied array behaves exactly as before. A caller whose list
+ * the server planned from a loan's own schedule passes the higher planned
+ * ceiling instead — see MAX_PLANNED_ALLOCATIONS_PER_COLLECTION for why the two
+ * differ. Neither is optional and neither can be turned off.
+ */
+function assertAllocationShape(allocations, { maxAllocations = MAX_ALLOCATIONS_PER_COLLECTION } = {}) {
   if (!Array.isArray(allocations) || allocations.length === 0) {
     throw ApiError.badRequest('At least one allocation is required');
   }
 
-  if (allocations.length > MAX_ALLOCATIONS_PER_COLLECTION) {
-    throw ApiError.badRequest(`A collection cannot allocate to more than ${MAX_ALLOCATIONS_PER_COLLECTION} instalments`);
+  if (allocations.length > maxAllocations) {
+    throw ApiError.badRequest(`A collection cannot allocate to more than ${maxAllocations} instalments`);
   }
 
   const emiIds = allocations.map((allocation) => Number(allocation.emiId));
@@ -249,7 +257,13 @@ async function recalculateEmis(emiIds, transaction, asOf = today()) {
  * collection posted without one, that portion is the whole amount and this
  * function behaves exactly as it always has.
  */
-async function validateAllocations({ allocations, collectionAmount, loanId, transaction }) {
+async function validateAllocations({
+  allocations,
+  collectionAmount,
+  loanId,
+  transaction,
+  maxAllocations = MAX_ALLOCATIONS_PER_COLLECTION
+}) {
   /*
    * A payment that was entirely bounce has no instalment portion, so there is
    * nothing to allocate and no allocation row to write. This is the ONLY case
@@ -266,7 +280,7 @@ async function validateAllocations({ allocations, collectionAmount, loanId, tran
   }
 
   // Shape and totals are checked before any lock is taken.
-  const allocatedTotal = assertAllocationShape(allocations);
+  const allocatedTotal = assertAllocationShape(allocations, { maxAllocations });
   assertAllocationTotal(allocatedTotal, collectionAmount);
 
   const emiIds = allocations.map((allocation) => Number(allocation.emiId));

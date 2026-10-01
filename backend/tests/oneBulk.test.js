@@ -877,6 +877,291 @@ const row = ({ loan, cif, amount, date, mode = 'CASH', ref = '', notes = '' }) =
     await destroyLoanFixture(loanN, customerN);
     await destroyLoanFixture(loanP, customerP);
 
+    // =====================================================================
+    // Large allocations and a whole-workbook import.
+    //
+    // One payment can settle every remaining instalment of a long daily loan,
+    // which is more than the request-shape limit of 100 allows for a
+    // client-supplied allocation array. These pin that a SERVER-PLANNED list
+    // is not bound by that limit, that it is still bound by something, and
+    // that a whole file's worth of rows goes in as one import.
+    // =====================================================================
+
+    async function makeDailyLoan({ name, mobile, startDate, tenure, loanAmount }) {
+      let customer;
+      let loan;
+      await sequelize.transaction(async (transaction) => {
+        customer = await customerService.createCustomerRecord({ firstName: name, mobile }, actor, transaction);
+        loan = await loanService.createLoanRecord(
+          { applicantCustomerId: customer.id, loanAmount, roi: '0', tenure, loanType: 'DAILY', interestMethod: 'FLAT', startDate },
+          actor,
+          transaction
+        );
+        await loan.update({ status: LOAN_STATUS.ACTIVE }, { transaction });
+      });
+      await emiScheduleService.generateSchedule(loan.id, actor);
+      return { customer, loan };
+    }
+
+    // Loan Q: 150 daily instalments of 100.00 -- comfortably past 100.
+    const { customer: customerQ, loan: loanQ } = await makeDailyLoan({
+      name: 'OneBulk Test Q',
+      mobile: '9000000015',
+      startDate: addDays(TODAY, -30),
+      tenure: 150,
+      loanAmount: '15000'
+    });
+
+    // ---------- Bulk Test 1 (spec 1) — 101 instalments in one collection ----------
+    {
+      // 101 x 100.00. The 100-instalment request-shape limit would have refused
+      // this outright; a planned list is measured against the planned ceiling.
+      const emisQ = await EmiSchedule.findAll({ where: { loanId: loanQ.id } });
+      const buffer = await buildWorkbook([
+        row({ loan: loanQ.loanNumber, cif: customerQ.cifId, amount: 10100, date: '', ref: 'BULK1' })
+      ]);
+      const result = await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bulk1.xlsx' });
+      const posted = result.imported[0];
+      const allocated = await CollectionAllocation.count({ where: { emiId: emisQ.map((e) => e.id) } });
+      record(
+        'Bulk Test 1 (spec 1) — a payment settling 101 instalments posts as ONE collection with 101 allocations',
+        emisQ.length === 150 &&
+          result.imported.length === 1 &&
+          posted.allocations.length === 101 &&
+          allocated === 101 &&
+          Number(posted.amount) === 10100 &&
+          posted.allocations.reduce((total, a) => total + Number(a.amount), 0) === 10100,
+        `emis=${emisQ.length} collections=${result.imported.length} allocations=${posted?.allocations.length} rowsWritten=${allocated}`
+      );
+    }
+
+    // ---------- Bulk Test 2 (spec 6) — a partial final instalment ----------
+    {
+      // 49 instalments remain at 100.00 each. Pay 4,050: 40 full instalments
+      // and half of the 41st.
+      const buffer = await buildWorkbook([
+        row({ loan: loanQ.loanNumber, cif: customerQ.cifId, amount: 4050, date: '', ref: 'BULK2' })
+      ]);
+      const result = await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bulk2.xlsx' });
+      const posted = result.imported[0];
+      const last = posted.allocations[posted.allocations.length - 1];
+      const emis = await EmiSchedule.findAll({ where: { loanId: loanQ.id }, order: [['emiNumber', 'ASC']] });
+      record(
+        'Bulk Test 2 (spec 6) — a large payment ending mid-instalment allocates the remainder as a partial payment',
+        posted.allocations.length === 41 &&
+          Number(last.amount) === 50 &&
+          last.emiNumber === 142 &&
+          emis[141].status === EMI_STATUS.PARTIAL &&
+          Number(emis[141].amountCollected) === 50 &&
+          emis.slice(0, 141).every((emi) => emi.status === EMI_STATUS.PAID),
+        `allocations=${posted?.allocations.length} last=EMI#${last?.emiNumber}/${last?.amount} status=${emis[141]?.status}`
+      );
+    }
+
+    // ---------- Bulk Test 3 (spec 5) — more than the loan still owes ----------
+    {
+      // 8 instalments x 100.00 = 800.00 left. 900.00 must be refused, not
+      // part-allocated and not banked.
+      const buffer = await buildWorkbook([
+        row({ loan: loanQ.loanNumber, cif: customerQ.cifId, amount: 900, date: '', ref: 'BULK3' })
+      ]);
+      const preview = await oneBulkImportService.previewImport(buffer, { filename: 'bulk3.xlsx' });
+      const before = await Collection.count({ where: { loanId: loanQ.id } });
+      let threw = null;
+      try {
+        await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bulk3.xlsx' });
+      } catch (error) {
+        threw = error;
+      }
+      const after = await Collection.count({ where: { loanId: loanQ.id } });
+      record(
+        'Bulk Test 3 (spec 5) — a payment above the loan’s remaining outstanding is refused on a long schedule too',
+        preview.rows[0].status === 'INVALID' &&
+          preview.rows[0].errors.some((e) => e.field === 'amount' && /cannot be allocated/.test(e.reason)) &&
+          preview.summary.invalidRows === 1 &&
+          preview.summary.validRows === 0 &&
+          threw !== null &&
+          before === after,
+        `status=${preview.rows[0].status} invalidRows=${preview.summary.invalidRows} collections ${before}->${after}`
+      );
+    }
+
+    // ---------- Bulk Test 4 (spec 2) — the ceiling, and where it comes from ----------
+    {
+      const { MAX_ALLOCATIONS_PER_COLLECTION, MAX_PLANNED_ALLOCATIONS_PER_COLLECTION } = require('../src/config/collections');
+      const { TENURE_MAX, COLLECTION_COUNT_MAX } = require('../src/config/loans');
+      const allocationService = require('../src/services/collectionAllocationService');
+
+      // A synthetic list, because no loan the system can create has more
+      // instalments than the ceiling -- which is the point of deriving it from
+      // TENURE_MAX rather than picking a number.
+      const synthetic = (count) =>
+        Array.from({ length: count }, (_, index) => ({ emiId: index + 1, amount: '1.00' }));
+
+      const atCeiling = (() => {
+        try {
+          allocationService.assertAllocationShape(synthetic(MAX_PLANNED_ALLOCATIONS_PER_COLLECTION), {
+            maxAllocations: MAX_PLANNED_ALLOCATIONS_PER_COLLECTION
+          });
+          return null;
+        } catch (error) {
+          return error.message;
+        }
+      })();
+
+      const overCeiling = (() => {
+        try {
+          allocationService.assertAllocationShape(synthetic(MAX_PLANNED_ALLOCATIONS_PER_COLLECTION + 1), {
+            maxAllocations: MAX_PLANNED_ALLOCATIONS_PER_COLLECTION
+          });
+          return null;
+        } catch (error) {
+          return error.message;
+        }
+      })();
+
+      const clientOver100 = (() => {
+        try {
+          allocationService.assertAllocationShape(synthetic(101));
+          return null;
+        } catch (error) {
+          return error.message;
+        }
+      })();
+
+      record(
+        'Bulk Test 4 (spec 2, 11) — the planned ceiling is TENURE_MAX, it is enforced, and the client limit is untouched at 100',
+        MAX_PLANNED_ALLOCATIONS_PER_COLLECTION === TENURE_MAX &&
+          COLLECTION_COUNT_MAX === TENURE_MAX &&
+          MAX_ALLOCATIONS_PER_COLLECTION === 100 &&
+          atCeiling === null &&
+          /cannot allocate to more than 3650 instalments/.test(overCeiling ?? '') &&
+          // The default is still the request-shape limit, so nothing a caller
+          // supplies got looser.
+          /cannot allocate to more than 100 instalments/.test(clientOver100 ?? ''),
+        `planned=${MAX_PLANNED_ALLOCATIONS_PER_COLLECTION} tenureMax=${TENURE_MAX} client=${MAX_ALLOCATIONS_PER_COLLECTION} atCeiling=${atCeiling} over=${overCeiling} client101=${clientOver100}`
+      );
+    }
+
+    await destroyLoanFixture(loanQ, customerQ);
+
+    // ---------- Bulk Test 5 (spec 3, 4, 8) — one file, 190 rows ----------
+    const bulkFixtures = [];
+    {
+      // Ten weekly loans of 19 instalments, one row per instalment: 190 rows in
+      // a single workbook, ten rows per loan, deliberately shuffled so the FIFO
+      // and date ordering has to do real work.
+      for (let index = 0; index < 10; index += 1) {
+        bulkFixtures.push(
+          // eslint-disable-next-line no-await-in-loop
+          await makeWeeklyLoan({
+            name: `OneBulk Test R${index}`,
+            mobile: `90000001${String(20 + index).padStart(2, '0')}`,
+            startDate: addDays(TODAY, -140),
+            tenure: 19,
+            loanAmount: '1900'
+          })
+        );
+      }
+
+      const sheetRows = [];
+      for (const { customer, loan } of bulkFixtures) {
+        for (let n = 1; n <= 19; n += 1) {
+          sheetRows.push(row({ loan: loan.loanNumber, cif: customer.cifId, amount: 100, date: '', ref: `R${loan.loanNumber}-${n}` }));
+        }
+      }
+      // Shuffle deterministically: interleave the loans rather than grouping them.
+      const interleaved = [];
+      for (let n = 0; n < 19; n += 1) {
+        for (let l = 0; l < 10; l += 1) interleaved.push(sheetRows[l * 19 + n]);
+      }
+
+      const buffer = await buildWorkbook(interleaved);
+      const preview = await oneBulkImportService.previewImport(buffer, { filename: 'bulk190.xlsx' });
+
+      const countsAgree =
+        preview.summary.totalRows === preview.rows.length &&
+        preview.summary.validRows === preview.rows.filter((r) => r.status === 'VALID').length &&
+        preview.summary.invalidRows === preview.rows.filter((r) => r.status === 'INVALID').length &&
+        preview.summary.duplicateRows === preview.rows.filter((r) => r.status === 'DUPLICATE').length &&
+        preview.summary.validRows + preview.summary.invalidRows + preview.summary.duplicateRows === preview.summary.totalRows;
+
+      record(
+        'Bulk Test 5 (spec 3, 8) — a 190-row workbook previews as 190 valid rows, and every summary count matches the rows themselves',
+        interleaved.length === 190 &&
+          preview.summary.totalRows === 190 &&
+          preview.summary.validRows === 190 &&
+          preview.summary.invalidRows === 0 &&
+          preview.summary.previewOnly === true &&
+          countsAgree,
+        `total=${preview.summary.totalRows} valid=${preview.summary.validRows} invalid=${preview.summary.invalidRows} countsAgree=${countsAgree}`
+      );
+
+      // ---------- Bulk Test 6 (spec 7) — one bad row, nothing posted ----------
+      const withBadRow = await buildWorkbook([
+        ...interleaved,
+        row({ loan: 'LN26-999999', cif: bulkFixtures[0].customer.cifId, amount: 100, date: '', ref: 'BADROW' })
+      ]);
+      const badPreview = await oneBulkImportService.previewImport(withBadRow, { filename: 'bulk191.xlsx' });
+      let badThrew = null;
+      try {
+        await oneBulkImportService.runImport(withBadRow, actor, context, { filename: 'bulk191.xlsx' });
+      } catch (error) {
+        badThrew = error;
+      }
+      const postedAfterBad = await Collection.count({
+        where: { loanId: bulkFixtures.map(({ loan }) => loan.id) }
+      });
+      record(
+        'Bulk Test 6 (spec 7) — one invalid row in a 191-row file posts nothing at all, and the summary counts it invalid',
+        badPreview.summary.totalRows === 191 &&
+          badPreview.summary.validRows === 190 &&
+          badPreview.summary.invalidRows === 1 &&
+          badThrew !== null &&
+          /unusable row/.test(badThrew.message) &&
+          postedAfterBad === 0,
+        `total=${badPreview.summary.totalRows} valid=${badPreview.summary.validRows} invalid=${badPreview.summary.invalidRows} posted=${postedAfterBad} threw=${badThrew?.message}`
+      );
+
+      // ---------- Bulk Test 7 (spec 3, 4) — post all 190 in one confirmation ----------
+      const result = await oneBulkImportService.runImport(buffer, actor, context, { filename: 'bulk190.xlsx' });
+      const totalPosted = result.imported.reduce((total, entry) => total + Number(entry.amount), 0);
+      const allocationRows = await CollectionAllocation.count({
+        include: [{ association: 'Collection', where: { loanId: bulkFixtures.map(({ loan }) => loan.id) }, required: true }]
+      });
+
+      // FIFO per loan: the rows for one loan, in the order they were posted,
+      // must have taken instalments 1..19 in order and nothing twice.
+      let fifoHolds = true;
+      for (const { loan } of bulkFixtures) {
+        // eslint-disable-next-line no-await-in-loop
+        const emis = await EmiSchedule.findAll({ where: { loanId: loan.id }, order: [['emiNumber', 'ASC']] });
+        if (emis.length !== 19) fifoHolds = false;
+        if (!emis.every((emi) => emi.status === EMI_STATUS.PAID && Number(emi.amountCollected) === 100)) fifoHolds = false;
+      }
+      const perLoan = result.imported.filter((entry) => entry.allocations.length === 1).length;
+
+      record(
+        'Bulk Test 7 (spec 3, 4) — all 190 rows post in one confirmation, each allocating to the next unpaid instalment in FIFO order',
+        result.imported.length === 190 &&
+          totalPosted === 19000 &&
+          Number(result.summary.importedAmount) === 19000 &&
+          allocationRows === 190 &&
+          perLoan === 190 &&
+          fifoHolds &&
+          result.reconciliation.collectionAmountEqualsAllocationTotal === true &&
+          result.reconciliation.loansAffected === 10 &&
+          result.reconciliation.emisAffected === 190 &&
+          result.reconciliation.fullyPaidEmis === 190,
+        `collections=${result.imported.length} amount=${totalPosted} allocationRows=${allocationRows} fifo=${fifoHolds} reconciliation=${JSON.stringify(result.reconciliation)}`
+      );
+    }
+
+    for (const { customer, loan } of bulkFixtures) {
+      await destroyLoanFixture(loan, customer);
+    }
+
+
     await destroyLoanFixture(loanD, customerD);
     await destroyLoanFixture(loanG, customerG);
     await destroyLoanFixture(loanH, customerH);

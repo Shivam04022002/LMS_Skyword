@@ -9,6 +9,7 @@
  * restarts annually.
  */
 const { toPaise } = require('../utils/money');
+const { TENURE_MAX } = require('./loans');
 
 const COLLECTION_NUMBER_PREFIX = 'COL';
 const COLLECTION_NUMBER_PADDING = 6;
@@ -60,7 +61,34 @@ const ALLOCATION_STRATEGIES = Object.freeze({
   FIFO: 'FIFO'
 });
 
+/**
+ * How many instalments one collection may allocate to.
+ *
+ * There are two ceilings because there are two kinds of allocation list, and
+ * only one of them is supplied by a caller.
+ *
+ * MAX_ALLOCATIONS_PER_COLLECTION is a REQUEST-SHAPE limit. It governs an
+ * allocations array that arrived in a request body — the Post Collection screen
+ * and the permanent import — where the length is chosen by the caller, each
+ * entry costs a row lock and a snapshot rebuild, and a long array is therefore
+ * something to bound before any of that work starts. Nothing about the database
+ * requires 100: `collection_allocations` has no row-count constraint, and the
+ * 1 MB body limit would itself admit far more. It is a deliberate product bound
+ * on client input and is UNCHANGED.
+ *
+ * MAX_PLANNED_ALLOCATIONS_PER_COLLECTION governs a list the SERVER planned,
+ * from a loan's own schedule, with no caller influence over its length — which
+ * today means the oneBulk importer's FIFO plan. A plan cannot be longer than
+ * the loan has instalments, so the honest ceiling is the most instalments a
+ * loan can have, and that is not a number to invent: every path through
+ * loanCalculationService bounds `emiCount` by TENURE_MAX, whether the tenure
+ * is written in periods (at most TENURE_MAX of them) or in months (which then
+ * REQUIRES a collectionCount, itself capped at COLLECTION_COUNT_MAX =
+ * TENURE_MAX). So this is TENURE_MAX: high enough that no real schedule can
+ * exceed it, and still a fixed bound rather than none at all.
+ */
 const MAX_ALLOCATIONS_PER_COLLECTION = 100;
+const MAX_PLANNED_ALLOCATIONS_PER_COLLECTION = TENURE_MAX;
 
 /**
  * BOUNCE COLLECTION — money actually received against a bounce charge.
@@ -105,6 +133,7 @@ module.exports = {
   COLLECTION_STATUS_VALUES,
   ALLOCATION_STRATEGIES,
   MAX_ALLOCATIONS_PER_COLLECTION,
+  MAX_PLANNED_ALLOCATIONS_PER_COLLECTION,
   DEFAULT_BOUNCE_AMOUNT,
   emiPortionPaise,
   COLLECTION_SEQUENCE_TABLE: 'collection_sequences'
