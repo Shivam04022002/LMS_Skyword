@@ -13244,14 +13244,33 @@ async function runRules(rules, source) {
       'context on the sheet, filters in the audit log'
     );
 
+    const analyticsHeaderSource = stripComments(
+      fs.readFileSync(
+        path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'analytics', 'AnalyticsHeader.jsx'),
+        'utf8'
+      )
+    );
+    const reportToolbarSource = stripComments(
+      fs.readFileSync(path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'reports', 'ReportToolbar.jsx'), 'utf8')
+    );
+
     record(
       'Graph & Analytics',
-      'the export button is the shared toolbar, so it is offered only with reports.export',
-      /<ReportToolbar/.test(graphPageSource) &&
-        /reportKey=\{REPORTS\.ANALYTICS\}/.test(graphPageSource) &&
-        // The APPLIED filters, not whatever the controls currently hold.
-        /filters=\{applied\}/.test(graphPageSource),
-      'ReportToolbar with the applied filters'
+      'EXPORT UNCHANGED: the same call, the same report key, the same permission gate, the applied filters',
+      // The analytics page has its own header now, because it needs an Apply step
+      // and a filter summary no report page has. What mattered about the shared
+      // toolbar still holds, so this follows the behaviour rather than the
+      // component name — and pins more than it used to.
+      /import \{ exportReportExcel \} from '\.\.\/\.\.\/services\/reportService'/.test(analyticsHeaderSource) &&
+        /exportReportExcel\(REPORTS\.ANALYTICS, appliedFilters\)/.test(analyticsHeaderSource) &&
+        /const canExport = can\(PERMISSIONS\.REPORTS_EXPORT\);/.test(analyticsHeaderSource) &&
+        /\{canExport \?/.test(analyticsHeaderSource) &&
+        // The page hands it the APPLIED filters, never the pending ones.
+        /appliedFilters=\{applied\}/.test(graphPageSource) &&
+        // and the shared toolbar the five report pages use is untouched.
+        /exportReportCsv, exportReportExcel/.test(reportToolbarSource) &&
+        /can\(PERMISSIONS\.REPORTS_EXPORT\)/.test(reportToolbarSource),
+      'exportReportExcel(analytics, applied) behind reports.export; ReportToolbar untouched'
     );
 
     /* ---- validation ---- */
@@ -13332,9 +13351,18 @@ async function runRules(rules, source) {
 
     record(
       'Graph & Analytics',
-      'LOADING and ERROR states exist on every chart card',
-      /\{error \?/.test(chartCardSource) && /loading \?/.test(chartCardSource) && /<Spinner/.test(chartCardSource),
-      'error, loading, empty, then the chart'
+      'LOADING, ERROR and EMPTY are all handled, and in that precedence',
+      /\{error \?/.test(chartCardSource) &&
+        /loading \?/.test(chartCardSource) &&
+        /empty \?/.test(chartCardSource) &&
+        /spinner-border/.test(chartCardSource) &&
+        /role="alert"/.test(chartCardSource) &&
+        // An error wins over loading, and loading over empty, so a failed load
+        // can never be presented as "no data". Matched as one chain rather than
+        // by comparing indexes: `!empty` also appears earlier, in the condition
+        // that decides whether to offer the chart-type switch at all.
+        /\{error \?[\s\S]*?: loading \?[\s\S]*?: empty \?/.test(chartCardSource),
+      'error, then loading, then empty, then the chart'
     );
 
     record(
@@ -13386,7 +13414,7 @@ async function runRules(rules, source) {
       !/byCollector|collectorAnalytics|groupByCollector/.test(analyticsServiceSource) &&
         /A collector FILTER, not a grouping/.test(
           fs.readFileSync(
-            path.resolve(__dirname, '..', '..', 'frontend', 'src', 'pages', 'analytics', 'GraphAnalyticsPage.jsx'),
+            path.resolve(__dirname, '..', '..', 'frontend', 'src', 'components', 'analytics', 'AnalyticsFilters.jsx'),
             'utf8'
           )
         ),

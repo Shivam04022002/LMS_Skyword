@@ -15,9 +15,9 @@ import { colorFor, exactInr } from './chartUtils';
  * a slice too thin to see is still readable, and colour is never the only channel.
  */
 
-const SIZE = 240;
-const RADIUS = 100;
-const INNER = 58;
+const SIZE = 220;
+const RADIUS = 96;
+const INNER = 62;
 const CENTRE = SIZE / 2;
 
 /** A point on the circle, at `angle` turns clockwise from twelve o'clock. */
@@ -52,14 +52,17 @@ export default function PieChart({ chart, valueKind = 'money' }) {
 
   // A negative share is not drawable, and a zero slice is listed rather than
   // drawn so the legend still accounts for the category.
-  const points = (chart.points ?? []).map((point) => ({ ...point, value: Math.max(0, Number(point[valueKind === 'count' ? 'count' : 'amount'] ?? 0)) }));
+  const points = (chart.points ?? []).map((point) => ({
+    ...point,
+    value: Math.max(0, Number(point[valueKind === 'count' ? 'count' : 'amount'] ?? 0))
+  }));
   const total = points.reduce((sum, point) => sum + point.value, 0);
   const format = (value) => (valueKind === 'count' ? String(value) : exactInr(value));
 
   if (total === 0) {
     return (
-      <p className="text-secondary mb-0">
-        Every category in this period is zero, so there is no share to divide. The figures are listed below.
+      <p className="text-secondary small mb-0">
+        Every category in this period is zero, so there is no share to divide.
       </p>
     );
   }
@@ -77,7 +80,7 @@ export default function PieChart({ chart, valueKind = 'money' }) {
       <div className="col-12 col-sm-auto">
         <svg
           viewBox={`0 0 ${SIZE} ${SIZE}`}
-          style={{ width: '100%', maxWidth: `${SIZE}px`, height: 'auto', display: 'block' }}
+          style={{ width: '100%', maxWidth: `${SIZE}px`, height: 'auto', display: 'block', margin: '0 auto' }}
           role="img"
           aria-label={`${chart.title}: ${slices.map((slice) => `${slice.label} ${(slice.share * 100).toFixed(1)}%`).join(', ')}`}
         >
@@ -90,7 +93,7 @@ export default function PieChart({ chart, valueKind = 'money' }) {
                 fill={colorFor(slice.index)}
                 stroke="#fff"
                 strokeWidth={2}
-                opacity={hover && hover.label !== slice.label ? 0.45 : 1}
+                opacity={hover && hover.label !== slice.label ? 0.4 : 1}
                 onMouseEnter={() => setHover(slice)}
                 onMouseLeave={() => setHover(null)}
                 onFocus={() => setHover(slice)}
@@ -100,35 +103,33 @@ export default function PieChart({ chart, valueKind = 'money' }) {
                 aria-label={`${slice.label}: ${format(slice.value)}, ${(slice.share * 100).toFixed(1)}%`}
               />
             ))}
-          <text x={CENTRE} y={CENTRE - 6} textAnchor="middle" fontSize={13} fill="#6c757d">
+          {/* The hub reads as the total, or as the hovered slice's share. */}
+          <text x={CENTRE} y={CENTRE - 7} textAnchor="middle" fontSize={11} fill="#8b94a6">
             {hover ? hover.label : 'Total'}
           </text>
-          <text x={CENTRE} y={CENTRE + 14} textAnchor="middle" fontSize={16} fontWeight="600" fill="#212529">
+          <text x={CENTRE} y={CENTRE + 12} textAnchor="middle" fontSize={hover ? 18 : 14} fontWeight="700" fill="#111827">
             {hover ? `${(hover.share * 100).toFixed(1)}%` : format(total)}
           </text>
         </svg>
       </div>
 
       <div className="col">
-        <ul className="list-unstyled mb-0 small">
+        <ul className="lms-analytics-pie-legend">
           {slices.map((slice) => (
-            <li key={slice.label} className="d-flex align-items-center gap-2 py-1 border-bottom">
+            <li
+              key={slice.label}
+              onMouseEnter={() => setHover(slice)}
+              onMouseLeave={() => setHover(null)}
+              style={{ opacity: hover && hover.label !== slice.label ? 0.55 : 1 }}
+            >
               <span
+                className="lms-analytics-swatch"
                 aria-hidden="true"
-                style={{
-                  width: '0.75rem',
-                  height: '0.75rem',
-                  borderRadius: '2px',
-                  display: 'inline-block',
-                  flex: '0 0 auto',
-                  background: colorFor(slice.index)
-                }}
+                style={{ background: colorFor(slice.index) }}
               />
               <span className="text-truncate">{slice.label}</span>
-              <span className="ms-auto text-nowrap fw-semibold">{format(slice.value)}</span>
-              <span className="text-secondary text-nowrap" style={{ minWidth: '3.5rem', textAlign: 'right' }}>
-                {(slice.share * 100).toFixed(1)}%
-              </span>
+              <span className="lms-analytics-pie-amount">{format(slice.value)}</span>
+              <span className="lms-analytics-pie-share">{(slice.share * 100).toFixed(1)}%</span>
             </li>
           ))}
         </ul>

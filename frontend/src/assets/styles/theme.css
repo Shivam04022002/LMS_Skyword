@@ -595,3 +595,462 @@ body {
     margin: 16mm;
   }
 }
+
+/* ---------- Graph & Analytics ----------
+   Every selector here is prefixed .lms-analytics-, so nothing in this block can
+   reach another page. The colours are the shell's own navy and the Bootstrap
+   subtle palette already used by the stat icons; no new brand colour is
+   introduced. */
+
+.lms-analytics-page {
+  /* One spacing scale for the whole page, so the header, filters, cards and
+     charts sit on the same rhythm instead of each choosing its own margin. */
+  --lms-analytics-gap: 1rem;
+  --lms-analytics-radius: 0.75rem;
+  --lms-analytics-border: #e6e9f0;
+  --lms-analytics-ink: #10233f;
+  --lms-analytics-muted: #6b7280;
+}
+
+/* A surface: a hairline border and a shadow you have to look for, rather than a
+   heavy card outline. */
+.lms-analytics-surface {
+  background: #fff;
+  border: 1px solid var(--lms-analytics-border);
+  border-radius: var(--lms-analytics-radius);
+  box-shadow: 0 1px 2px rgba(16, 35, 63, 0.04);
+}
+
+/* ---- header ---- */
+
+.lms-analytics-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--lms-analytics-ink);
+  margin: 0;
+}
+
+.lms-analytics-subtitle {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--lms-analytics-muted);
+  margin: 0.25rem 0 0;
+  max-width: 62ch;
+}
+
+/* The applied-filter summary. Chips wrap rather than scroll: they are a
+   statement of what is on screen, so every one of them must stay readable. */
+.lms-analytics-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  align-items: center;
+}
+
+.lms-analytics-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  padding: 0.1875rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  border-radius: 0.375rem;
+  background: #f4f6fa;
+  border: 1px solid var(--lms-analytics-border);
+  color: #374151;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lms-analytics-chip-key {
+  color: var(--lms-analytics-muted);
+}
+
+.lms-analytics-chip-value {
+  font-weight: 600;
+  color: #111827;
+}
+
+/* ---- section tabs ---- */
+
+/* A scroll container on narrow screens; a plain row once everything fits. The
+   page itself never gains a horizontal scrollbar. */
+.lms-analytics-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.lms-analytics-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+  flex: 0 0 auto;
+  padding: 0.5rem 0.875rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: #4b5563;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  transition: background-color 0.12s ease-in-out, color 0.12s ease-in-out, border-color 0.12s ease-in-out;
+}
+
+.lms-analytics-tab:hover:not(:disabled):not([aria-current='page']) {
+  background: #f4f6fa;
+  color: #1f2937;
+}
+
+.lms-analytics-tab:focus-visible {
+  outline: 2px solid #0d6efd;
+  outline-offset: 2px;
+}
+
+/* The active tab is filled AND carries a check, so it is not distinguished by
+   colour alone. */
+.lms-analytics-tab[aria-current='page'] {
+  background: var(--lms-analytics-ink);
+  border-color: var(--lms-analytics-ink);
+  color: #fff;
+  font-weight: 600;
+}
+
+.lms-analytics-tab:disabled {
+  opacity: 0.6;
+}
+
+/* ---- filter panel ---- */
+
+.lms-analytics-filters-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.75rem;
+  margin-bottom: 0.875rem;
+  border-bottom: 1px solid var(--lms-analytics-border);
+}
+
+.lms-analytics-filters-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--lms-analytics-muted);
+  margin: 0;
+}
+
+/* A labelled group of related controls — dates together, scope together. */
+.lms-analytics-field-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #4b5563;
+  margin-bottom: 0.25rem;
+}
+
+/* Matched control heights, so a row of inputs and selects lines up. */
+.lms-analytics-page .form-control,
+.lms-analytics-page .form-select {
+  height: 2.375rem;
+  padding-top: 0.375rem;
+  padding-bottom: 0.375rem;
+  font-size: 0.875rem;
+  border-color: #d7dce5;
+  border-radius: 0.5rem;
+}
+
+.lms-analytics-page .form-control:focus,
+.lms-analytics-page .form-select:focus {
+  border-color: #6b9bf5;
+  box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.12);
+}
+
+.lms-analytics-group-label {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9ca3af;
+  margin-bottom: 0.375rem;
+}
+
+/* ---- metric cards ---- */
+
+.lms-analytics-metric {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1rem;
+  height: 100%;
+}
+
+.lms-analytics-metric-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 0.625rem;
+  font-size: 1.125rem;
+  flex: 0 0 auto;
+}
+
+.lms-analytics-metric-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--lms-analytics-muted);
+  margin: 0 0 0.125rem;
+  /* Two words or ten, the card keeps its height. */
+  min-height: 1.125rem;
+}
+
+/* The number is the point of the card. */
+.lms-analytics-metric-value {
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1.15;
+  color: #111827;
+  margin: 0;
+  /* Long INR figures wrap inside the card instead of widening it. */
+  overflow-wrap: anywhere;
+}
+
+.lms-analytics-metric-sub {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: #9ca3af;
+  margin: 0.1875rem 0 0;
+}
+
+/* ---- chart cards ---- */
+
+.lms-analytics-chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.lms-analytics-chart-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--lms-analytics-ink);
+  margin: 0;
+}
+
+.lms-analytics-chart-note {
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--lms-analytics-muted);
+  margin: 0.1875rem 0 0;
+  max-width: 70ch;
+}
+
+/* The bar / line / pie switch. */
+.lms-analytics-type-switch {
+  display: inline-flex;
+  gap: 0.125rem;
+  padding: 0.125rem;
+  background: #f4f6fa;
+  border: 1px solid var(--lms-analytics-border);
+  border-radius: 0.5rem;
+  flex: 0 0 auto;
+}
+
+.lms-analytics-type-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.875rem;
+  height: 1.625rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: #6b7280;
+  font-size: 0.8125rem;
+  transition: background-color 0.12s ease-in-out, color 0.12s ease-in-out;
+}
+
+.lms-analytics-type-button:hover:not([aria-pressed='true']) {
+  color: #1f2937;
+}
+
+.lms-analytics-type-button:focus-visible {
+  outline: 2px solid #0d6efd;
+  outline-offset: 1px;
+}
+
+.lms-analytics-type-button[aria-pressed='true'] {
+  background: #fff;
+  color: var(--lms-analytics-ink);
+  box-shadow: 0 1px 2px rgba(16, 35, 63, 0.12);
+}
+
+/* ---- legend ---- */
+
+.lms-analytics-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-bottom: 0.75rem;
+}
+
+.lms-analytics-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--lms-analytics-border);
+  border-radius: 0.375rem;
+  background: #fff;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: #374151;
+  transition: background-color 0.12s ease-in-out, border-color 0.12s ease-in-out;
+}
+
+.lms-analytics-legend-item:hover {
+  border-color: #c3cad8;
+  background: #fafbfd;
+}
+
+.lms-analytics-legend-item:focus-visible {
+  outline: 2px solid #0d6efd;
+  outline-offset: 1px;
+}
+
+/* A hidden series is struck through as well as emptied, so the state does not
+   depend on seeing the swatch fill. */
+.lms-analytics-legend-item[aria-pressed='false'] {
+  background: #f4f6fa;
+  color: #9ca3af;
+}
+
+.lms-analytics-legend-item[aria-pressed='false'] .lms-analytics-legend-text {
+  text-decoration: line-through;
+}
+
+.lms-analytics-swatch {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 0.1875rem;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+/* ---- tooltip ---- */
+
+.lms-analytics-tooltip {
+  position: absolute;
+  z-index: 3;
+  min-width: 11rem;
+  max-width: 17rem;
+  padding: 0.5rem 0.625rem;
+  background: #fff;
+  border: 1px solid #d7dce5;
+  border-radius: 0.5rem;
+  box-shadow: 0 0.5rem 1.25rem rgba(16, 35, 63, 0.16);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.lms-analytics-tooltip-title {
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 0.125rem;
+}
+
+.lms-analytics-tooltip-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.375rem;
+}
+
+.lms-analytics-tooltip-value {
+  margin-left: auto;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #111827;
+  white-space: nowrap;
+}
+
+/* ---- pie legend ---- */
+
+.lms-analytics-pie-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.8125rem;
+}
+
+.lms-analytics-pie-legend li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0;
+  border-bottom: 1px solid #f1f3f7;
+}
+
+.lms-analytics-pie-legend li:last-child {
+  border-bottom: 0;
+}
+
+.lms-analytics-pie-amount {
+  margin-left: auto;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lms-analytics-pie-share {
+  min-width: 3.25rem;
+  text-align: right;
+  color: var(--lms-analytics-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---- empty / loading ---- */
+
+.lms-analytics-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 15rem;
+  color: var(--lms-analytics-muted);
+  text-align: center;
+  padding: 1.5rem;
+}
+
+.lms-analytics-placeholder-icon {
+  font-size: 1.75rem;
+  color: #c3cad8;
+}
+
+/* Someone who has asked for less motion gets none of the above. */
+@media (prefers-reduced-motion: reduce) {
+  .lms-analytics-tab,
+  .lms-analytics-type-button,
+  .lms-analytics-legend-item {
+    transition: none;
+  }
+}

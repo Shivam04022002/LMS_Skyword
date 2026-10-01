@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import Spinner from '../common/Spinner';
 import PieChart from './PieChart';
 import SeriesChart from './SeriesChart';
 import { isEmptyChart, seriesOf } from './chartUtils';
@@ -16,8 +15,9 @@ import { isEmptyChart, seriesOf } from './chartUtils';
  */
 
 const TYPE_ICON = { bar: 'bi-bar-chart-fill', line: 'bi-graph-up', pie: 'bi-pie-chart-fill' };
+const TYPE_LABEL = { bar: 'Bar chart', line: 'Line chart', pie: 'Donut chart' };
 
-export default function ChartCard({ chart, bucket, loading, error, valueKind = 'money', defaultType = 'bar', className = '' }) {
+export default function ChartCard({ chart, bucket, loading, error, valueKind = 'money', defaultType = 'bar' }) {
   const [type, setType] = useState(defaultType);
 
   const isSeries = chart?.kind === 'series';
@@ -30,59 +30,58 @@ export default function ChartCard({ chart, bucket, loading, error, valueKind = '
   const empty = chart ? isEmptyChart(chart) : true;
 
   return (
-    <div className={`card border-0 shadow-sm h-100 ${className}`}>
-      <div className="card-body">
-        <div className="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-2">
-          <div>
-            <h2 className="h6 fw-bold mb-0">{chart?.title ?? 'Chart'}</h2>
-            {chart?.note ? <p className="form-text mt-1 mb-0">{chart.note}</p> : null}
-          </div>
-
-          {available.length > 1 && !loading && !error && !empty ? (
-            <div className="btn-group btn-group-sm" role="group" aria-label={`Chart type for ${chart.title}`}>
-              {available.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  className={`btn ${effectiveType === option ? 'btn-secondary' : 'btn-outline-secondary'}`}
-                  aria-pressed={effectiveType === option}
-                  onClick={() => setType(option)}
-                  title={`Show as ${option} chart`}
-                >
-                  <i className={`bi ${TYPE_ICON[option]}`} aria-hidden="true" />
-                  <span className="visually-hidden">{option}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
+    <section className="lms-analytics-surface p-3 p-md-4 h-100">
+      <div className="lms-analytics-chart-head">
+        <div className="min-w-0">
+          <h2 className="lms-analytics-chart-title">{chart?.title ?? 'Chart'}</h2>
+          {chart?.note ? <p className="lms-analytics-chart-note">{chart.note}</p> : null}
         </div>
 
-        {error ? (
-          <div className="alert alert-danger mb-0 d-flex align-items-start gap-2" role="alert">
-            <i className="bi bi-exclamation-triangle-fill mt-1" aria-hidden="true" />
-            <div>{error}</div>
+        {available.length > 1 && !loading && !error && !empty ? (
+          <div className="lms-analytics-type-switch" role="group" aria-label={`Chart type for ${chart.title}`}>
+            {available.map((option) => (
+              <button
+                key={option}
+                type="button"
+                className="lms-analytics-type-button"
+                aria-pressed={effectiveType === option}
+                onClick={() => setType(option)}
+                title={TYPE_LABEL[option]}
+              >
+                <i className={`bi ${TYPE_ICON[option]}`} aria-hidden="true" />
+                <span className="visually-hidden">{TYPE_LABEL[option]}</span>
+              </button>
+            ))}
           </div>
-        ) : loading ? (
-          <div className="py-5">
-            <Spinner label={`Loading ${chart?.title ?? 'chart'}…`} />
-          </div>
-        ) : empty ? (
-          /*
-            An empty dataset says so. It deliberately does not draw a flat line
-            along zero: that reads as "we measured zero every day", which is a
-            different claim from "there is nothing here to measure".
-          */
-          <div className="text-center text-secondary py-5">
-            <i className="bi bi-inbox fs-3 d-block mb-2" aria-hidden="true" />
-            <p className="mb-0">No data in this period for these filters.</p>
-            <p className="small mb-0">Nothing is charted rather than drawing a zero trend.</p>
-          </div>
-        ) : effectiveType === 'pie' ? (
-          <PieChart chart={chart} valueKind={valueKind} />
-        ) : (
-          <SeriesChart chart={chart} bucket={bucket} type={effectiveType} valueKind={valueKind} />
-        )}
+        ) : null}
       </div>
-    </div>
+
+      {error ? (
+        <div className="alert alert-danger mb-0 d-flex align-items-start gap-2 py-2 px-3 small" role="alert">
+          <i className="bi bi-exclamation-triangle-fill mt-1" aria-hidden="true" />
+          <div>{error}</div>
+        </div>
+      ) : loading ? (
+        <div className="lms-analytics-placeholder">
+          <span className="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true" />
+          <p className="mb-0 mt-2 small">Loading {chart?.title?.toLowerCase() ?? 'chart'}…</p>
+        </div>
+      ) : empty ? (
+        /*
+          An empty dataset says so. It deliberately does not draw a flat line
+          along zero: that reads as "we measured zero every day", which is a
+          different claim from "there is nothing here to measure".
+        */
+        <div className="lms-analytics-placeholder">
+          <i className="bi bi-inbox lms-analytics-placeholder-icon" aria-hidden="true" />
+          <p className="mb-0">No data in this period for these filters.</p>
+          <p className="small mb-0 text-body-tertiary">Nothing is charted rather than drawing a zero trend.</p>
+        </div>
+      ) : effectiveType === 'pie' ? (
+        <PieChart chart={chart} valueKind={valueKind} />
+      ) : (
+        <SeriesChart chart={chart} bucket={bucket} type={effectiveType} valueKind={valueKind} />
+      )}
+    </section>
   );
 }

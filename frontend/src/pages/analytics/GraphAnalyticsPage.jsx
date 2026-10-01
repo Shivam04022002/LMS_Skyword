@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import AlertMessage from '../../components/common/AlertMessage';
 import usePermissions from '../../hooks/usePermissions';
+import AnalyticsFilters from '../../components/analytics/AnalyticsFilters';
+import AnalyticsHeader from '../../components/analytics/AnalyticsHeader';
+import AnalyticsMetricCards from '../../components/analytics/AnalyticsMetricCards';
+import AnalyticsSectionTabs from '../../components/analytics/AnalyticsSectionTabs';
 import ChartCard from '../../components/charts/ChartCard';
-import ReportSummaryCards from '../../components/reports/ReportSummaryCards';
-import ReportToolbar from '../../components/reports/ReportToolbar';
 import { getAnalytics } from '../../services/reportService';
 import { getRoutes } from '../../services/routeService';
 import { fetchUsers } from '../../services/userService';
 import { formatCurrency, LOAN_STATUSES, LOAN_TYPES } from '../../utils/loanConstants';
 import { PERMISSIONS } from '../../utils/permissions';
-import { ANALYTICS_BUCKETS, ANALYTICS_SECTIONS, REPORTS } from '../../utils/reportConstants';
+import { ANALYTICS_BUCKETS, ANALYTICS_SECTIONS } from '../../utils/reportConstants';
 import { today } from '../../utils/today';
 
 /**
@@ -22,6 +24,13 @@ import { today } from '../../utils/today';
  *
  * One section is loaded at a time. A page that drew all six would run every
  * aggregation on every filter change, and most of it would be off screen.
+ *
+ * The header, tabs, filter panel and metric cards are this page's own components
+ * rather than the shared report ones: it needs an Apply step, a dirty-state
+ * notice and a filter summary that no report page has. The shared ReportToolbar
+ * and ReportSummaryCards are used unchanged by five report pages and are left
+ * alone; the export is the same call, with the same permission gate and the same
+ * applied filters.
  */
 
 const EMI_STATUSES = ['PENDING', 'DUE', 'PARTIAL', 'PAID', 'OVERDUE', 'WAIVED'];
@@ -43,8 +52,10 @@ const SECTIONS = [
   { key: ANALYTICS_SECTIONS.COLLECTIONS, label: 'Collections', icon: 'bi-wallet2' },
   { key: ANALYTICS_SECTIONS.EMIS, label: 'Instalments', icon: 'bi-list-check' },
   { key: ANALYTICS_SECTIONS.BOUNCE, label: 'Bounce', icon: 'bi-exclamation-octagon' },
-  { key: ANALYTICS_SECTIONS.DEMAND_VS_COLLECTION, label: 'Demand vs collection', icon: 'bi-bar-chart' }
+  { key: ANALYTICS_SECTIONS.DEMAND_VS_COLLECTION, label: 'Demand vs Collection', icon: 'bi-bar-chart' }
 ];
+
+const SECTION_LABEL = Object.fromEntries(SECTIONS.map((section) => [section.key, section.label]));
 
 /** A chart defaults to the type that reads its data most honestly. */
 const DEFAULT_TYPE = {
@@ -65,6 +76,20 @@ const DEFAULT_TYPE = {
 
 /** Charts whose measure is a count of records rather than money. */
 const COUNT_CHARTS = new Set(['dpdDistribution']);
+
+/** The caveat each section needs stated before its charts are read. */
+const SECTION_NOTE = {
+  [ANALYTICS_SECTIONS.BOUNCE]: {
+    title: 'A charge levied is not money received.',
+    body:
+      'Charges assessed come from the instalments they were levied on; bounce collected is money that actually arrived. The two are charted separately and never added, so an unpaid charge contributes nothing to any collected figure.'
+  },
+  [ANALYTICS_SECTIONS.DEMAND_VS_COLLECTION]: {
+    title: 'Demand is not money received.',
+    body:
+      'Demand is instalment value owed; collected is what was posted. They are charted side by side and never summed. A collection rate is shown only for a period that had demand to collect against — where there was none it is left blank, because a rate over nothing is undefined, not zero.'
+  }
+};
 
 export default function GraphAnalyticsPage() {
   const { can } = usePermissions();
@@ -154,6 +179,41 @@ export default function GraphAnalyticsPage() {
 
   const dirty = JSON.stringify(filters) !== JSON.stringify(applied);
 
+  /*
+   * The applied-filter summary, built from what the BACKEND echoed back rather
+   * than from the controls, so it describes the data on screen and not a pending
+   * edit to the filters.
+   */
+  const chips = useMemo(() => {
+    if (!data) return [];
+
+    const list = [
+      { key: 'section', label: '', value: SECTION_LABEL[data.section] ?? data.section, icon: 'bi-collection' },
+      { key: 'period', label: '', value: `${data.period.from} → ${data.period.to}`, icon: 'bi-calendar-range' },
+      { key: 'bucket', label: 'by', value: data.bucket, icon: 'bi-bar-chart-steps' }
+    ];
+
+    if ((SECTION_FILTERS[data.section] ?? []).includes('date')) {
+      list.push({ key: 'asOf', label: 'as of', value: data.asOf, icon: 'bi-clock-history' });
+    }
+
+    const active = data.appliedFilters ?? {};
+    if (active.routeId) {
+      const match = routes.find((route) => String(route.id) === String(active.routeId));
+      list.push({ key: 'route', label: 'Route', value: match?.routeCode ?? active.routeId, icon: 'bi-signpost-split' });
+    }
+    if (active.collectorId) {
+      const match = collectors.find((collector) => String(collector.id) === String(active.collectorId));
+      list.push({ key: 'collector', label: 'Collector', value: match?.name ?? active.collectorId, icon: 'bi-person-badge' });
+    }
+    if (active.status) list.push({ key: 'status', label: 'Loan', value: active.status, icon: 'bi-tag' });
+    if (active.loanType) list.push({ key: 'loanType', label: 'Type', value: active.loanType, icon: 'bi-diagram-3' });
+    if (active.emiStatus) list.push({ key: 'emiStatus', label: 'Instalment', value: active.emiStatus, icon: 'bi-list-check' });
+    if (active.ledgerType) list.push({ key: 'ledgerType', label: 'Mode', value: active.ledgerType, icon: 'bi-credit-card' });
+
+    return list;
+  }, [data, routes, collectors]);
+
   const tiles = useMemo(() => {
     if (!summary) return [];
     const tile = (key, label, value, sub, icon, accent) => ({ key, label, value, sub, icon, accent });
@@ -200,217 +260,65 @@ export default function GraphAnalyticsPage() {
     }
   }, [summary, applied.section]);
 
+  const note = SECTION_NOTE[applied.section];
+  const chartEntries = Object.entries(charts);
+
   return (
-    <div className="container-fluid px-0">
-      <ReportToolbar
-        title="Graph & Analytics"
-        description="Loan, demand, collection, instalment and bounce performance as charts. Every figure is the one the matching report produces for the same filters."
-        reportKey={REPORTS.ANALYTICS}
-        exportFormat="xlsx"
-        // The applied filters, not the pending ones: the file matches the charts.
-        filters={applied}
+    <div className="lms-analytics-page container-fluid px-0">
+      <AnalyticsHeader
+        chips={chips}
+        dirty={dirty}
         loading={loading}
-        resultCount={data?.rows?.length}
-        onRefresh={() => load(applied)}
+        appliedFilters={applied}
+        pointCount={summary?.pointCount}
+        onApply={() => setApplied(filters)}
         onReset={() => {
           setFilters(emptyFilters);
           setApplied(emptyFilters);
         }}
+        onRefresh={() => load(applied)}
       />
 
       <AlertMessage message={error} onDismiss={() => setError('')} />
 
-      {/* Section switch */}
-      <ul className="nav nav-pills flex-wrap gap-1 mb-3" role="tablist">
-        {SECTIONS.map((section) => (
-          <li className="nav-item" key={section.key} role="presentation">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={applied.section === section.key}
-              className={`nav-link ${applied.section === section.key ? 'active' : ''}`}
-              onClick={() => selectSection(section.key)}
-              disabled={loading}
-            >
-              <i className={`bi ${section.icon} me-1`} aria-hidden="true" />
-              {section.label}
-            </button>
-          </li>
-        ))}
-      </ul>
+      <AnalyticsSectionTabs sections={SECTIONS} active={applied.section} loading={loading} onSelect={selectSection} />
 
-      {/* Filters */}
-      <div className="card border-0 shadow-sm mb-3">
-        <div className="card-body">
-          <div className="row g-2 align-items-end">
-            {shows('date') ? (
-              <div className="col-6 col-md-3 col-xl-2">
-                <label className="form-label small fw-semibold" htmlFor="ga-asof">As of</label>
-                <input id="ga-asof" type="date" className="form-control" value={filters.date} onChange={set('date')} />
-              </div>
-            ) : null}
+      <AnalyticsFilters
+        filters={filters}
+        shows={shows}
+        routes={routes}
+        collectors={collectors}
+        buckets={ANALYTICS_BUCKETS}
+        loanStatuses={LOAN_STATUSES}
+        loanTypes={LOAN_TYPES}
+        emiStatuses={EMI_STATUSES}
+        ledgerTypes={LEDGER_TYPES}
+        dirty={dirty}
+        loading={loading}
+        onChange={set}
+        onApply={() => setApplied(filters)}
+      />
 
-            <div className="col-6 col-md-3 col-xl-2">
-              <label className="form-label small fw-semibold" htmlFor="ga-from">From</label>
-              <input id="ga-from" type="date" className="form-control" value={filters.dateFrom} onChange={set('dateFrom')} />
-            </div>
-            <div className="col-6 col-md-3 col-xl-2">
-              <label className="form-label small fw-semibold" htmlFor="ga-to">To</label>
-              <input id="ga-to" type="date" className="form-control" value={filters.dateTo} onChange={set('dateTo')} />
-            </div>
-
-            <div className="col-6 col-md-3 col-xl-2">
-              <label className="form-label small fw-semibold" htmlFor="ga-bucket">Group by</label>
-              <select id="ga-bucket" className="form-select" value={filters.bucket} onChange={set('bucket')}>
-                <option value={ANALYTICS_BUCKETS.DAY}>Day</option>
-                <option value={ANALYTICS_BUCKETS.WEEK}>Week</option>
-                <option value={ANALYTICS_BUCKETS.MONTH}>Month</option>
-              </select>
-            </div>
-
-            <div className="col-6 col-md-3 col-xl-2">
-              <label className="form-label small fw-semibold" htmlFor="ga-route">Route</label>
-              <select id="ga-route" className="form-select" value={filters.routeId} onChange={set('routeId')}>
-                <option value="">All routes</option>
-                {routes.map((route) => (
-                  <option key={route.id} value={route.id}>{route.routeCode}</option>
-                ))}
-              </select>
-            </div>
-
-{collectors.length > 0 ? (
-              <div className="col-6 col-md-3 col-xl-2">
-                <label className="form-label small fw-semibold" htmlFor="ga-collector">Collector</label>
-                {/*
-                  A collector FILTER, not a grouping. A collection records who
-                  keyed it, not who collected it, and a route can have several
-                  collectors — so attributing an amount to one of them would
-                  either misreport or double-count. Filtering by collector means
-                  "the routes this collector is assigned to", which is exactly
-                  what every other report means by it.
-                */}
-                <select id="ga-collector" className="form-select" value={filters.collectorId} onChange={set('collectorId')}>
-                  <option value="">All collectors</option>
-                  {collectors.map((collector) => (
-                    <option key={collector.id} value={collector.id}>{collector.name}</option>
-                  ))}
-                </select>
-              </div>
-            ) : null}
-
-            {shows('status') ? (
-              <div className="col-6 col-md-3 col-xl-2">
-                <label className="form-label small fw-semibold" htmlFor="ga-status">Loan status</label>
-                <select id="ga-status" className="form-select" value={filters.status} onChange={set('status')}>
-                  <option value="">All statuses</option>
-                  {LOAN_STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}
-                </select>
-              </div>
-            ) : null}
-
-            {shows('loanType') ? (
-              <div className="col-6 col-md-3 col-xl-2">
-                <label className="form-label small fw-semibold" htmlFor="ga-type">Loan type</label>
-                <select id="ga-type" className="form-select" value={filters.loanType} onChange={set('loanType')}>
-                  <option value="">All types</option>
-                  {LOAN_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
-                </select>
-              </div>
-            ) : null}
-
-            {shows('emiStatus') ? (
-              <div className="col-6 col-md-3 col-xl-2">
-                <label className="form-label small fw-semibold" htmlFor="ga-emi-status">Instalment status</label>
-                <select id="ga-emi-status" className="form-select" value={filters.emiStatus} onChange={set('emiStatus')}>
-                  <option value="">All statuses</option>
-                  {EMI_STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}
-                </select>
-              </div>
-            ) : null}
-
-            {shows('ledgerType') ? (
-              <div className="col-6 col-md-3 col-xl-2">
-                <label className="form-label small fw-semibold" htmlFor="ga-mode">Payment mode</label>
-                <select id="ga-mode" className="form-select" value={filters.ledgerType} onChange={set('ledgerType')}>
-                  <option value="">All modes</option>
-                  {LEDGER_TYPES.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
-                </select>
-              </div>
-            ) : null}
-
-            <div className="col-12 col-xl-auto d-flex gap-2">
-              <button type="button" className="btn btn-primary" onClick={() => setApplied(filters)} disabled={loading || !dirty}>
-                <i className="bi bi-funnel me-1" aria-hidden="true" />
-                Apply
-              </button>
-            </div>
-          </div>
-
-          {dirty ? (
-            <p className="form-text mb-0 mt-2">
-              <i className="bi bi-info-circle me-1" aria-hidden="true" />
-              The charts below still show the previously applied filters. Choose Apply to use these.
-            </p>
-          ) : null}
-        </div>
-      </div>
-
-      {/* What is actually on screen, stated rather than implied */}
-      {data ? (
-        <div className="d-flex flex-wrap gap-2 align-items-center mb-3 small">
-          <span className="text-secondary">Showing</span>
-          <span className="badge text-bg-light border">
-            {data.period.from} to {data.period.to}
-          </span>
-          <span className="badge text-bg-light border">grouped by {data.bucket}</span>
-          {shows('date') ? <span className="badge text-bg-light border">as of {data.asOf}</span> : null}
-          {data.appliedFilters.routeId ? (
-            <span className="badge text-bg-light border">
-              route {routes.find((route) => String(route.id) === String(data.appliedFilters.routeId))?.routeCode ?? data.appliedFilters.routeId}
-            </span>
-          ) : null}
-          {data.appliedFilters.collectorId ? (
-            <span className="badge text-bg-light border">
-              collector {collectors.find((c) => String(c.id) === String(data.appliedFilters.collectorId))?.name ?? data.appliedFilters.collectorId}
-            </span>
-          ) : null}
-          {data.appliedFilters.status ? <span className="badge text-bg-light border">loan {data.appliedFilters.status}</span> : null}
-          {data.appliedFilters.loanType ? <span className="badge text-bg-light border">{data.appliedFilters.loanType}</span> : null}
-          {data.appliedFilters.emiStatus ? <span className="badge text-bg-light border">instalment {data.appliedFilters.emiStatus}</span> : null}
-          {data.appliedFilters.ledgerType ? <span className="badge text-bg-light border">{data.appliedFilters.ledgerType}</span> : null}
+      {tiles.length > 0 || loading ? (
+        <div className="mb-3">
+          <AnalyticsMetricCards tiles={tiles} loading={loading} />
         </div>
       ) : null}
 
-      {tiles.length > 0 ? <div className="mb-4"><ReportSummaryCards tiles={tiles} /></div> : null}
-
-      {applied.section === ANALYTICS_SECTIONS.BOUNCE ? (
-        <div className="alert alert-info d-flex align-items-start gap-2">
+      {note ? (
+        <div className="alert alert-info d-flex align-items-start gap-2 py-2 px-3 small">
           <i className="bi bi-info-circle-fill mt-1" aria-hidden="true" />
           <div>
-            <strong>A charge levied is not money received.</strong> Charges assessed come from the instalments they were
-            levied on; bounce collected is money that actually arrived. The two are charted separately and never added,
-            so an unpaid charge contributes nothing to any collected figure.
-          </div>
-        </div>
-      ) : null}
-
-      {applied.section === ANALYTICS_SECTIONS.DEMAND_VS_COLLECTION ? (
-        <div className="alert alert-info d-flex align-items-start gap-2">
-          <i className="bi bi-info-circle-fill mt-1" aria-hidden="true" />
-          <div>
-            <strong>Demand is not money received.</strong> Demand is instalment value owed; collected is what was posted.
-            They are charted side by side and never summed. A collection rate is shown only for a period that had demand
-            to collect against — where there was none it is left blank, because a rate over nothing is undefined, not zero.
+            <strong>{note.title}</strong> {note.body}
           </div>
         </div>
       ) : null}
 
       <div className="row g-3">
-        {Object.entries(charts).map(([key, chart]) => (
-          <div
-            className={chart.kind === 'series' ? 'col-12' : 'col-12 col-xl-6'}
-            key={key}
-          >
+        {chartEntries.map(([key, chart]) => (
+          // A date series needs the full width to be readable; a category
+          // breakdown reads well in half, and pairs up on a wide screen.
+          <div className={chart.kind === 'series' ? 'col-12' : 'col-12 col-xl-6'} key={key}>
             <ChartCard
               chart={chart}
               bucket={data?.bucket ?? applied.bucket}
@@ -421,18 +329,21 @@ export default function GraphAnalyticsPage() {
           </div>
         ))}
 
-        {/* Loading with nothing yet drawn, and the no-charts case. */}
-        {Object.keys(charts).length === 0 ? (
+        {/* Nothing drawn yet: loading on first paint, or a selection with no charts. */}
+        {chartEntries.length === 0 ? (
           <div className="col-12">
-            <div className="card border-0 shadow-sm">
-              <div className="card-body text-center text-secondary py-5">
+            <div className="lms-analytics-surface">
+              <div className="lms-analytics-placeholder">
                 {loading ? (
                   <>
                     <span className="spinner-border text-primary" role="status" aria-hidden="true" />
-                    <p className="mt-2 mb-0">Loading analytics…</p>
+                    <p className="mb-0 mt-2">Loading analytics…</p>
                   </>
                 ) : (
-                  <p className="mb-0">No charts for this selection.</p>
+                  <>
+                    <i className="bi bi-bar-chart-line lms-analytics-placeholder-icon" aria-hidden="true" />
+                    <p className="mb-0">No charts for this selection.</p>
+                  </>
                 )}
               </div>
             </div>
@@ -440,9 +351,10 @@ export default function GraphAnalyticsPage() {
         ) : null}
       </div>
 
-      <p className="form-text mt-3 mb-0">
-        Exported as Excel, this writes every point of every chart above for the applied filters — not only the points
-        currently visible — with the filters and the generation date on a Summary sheet.
+      <p className="text-secondary small mt-3 mb-0">
+        <i className="bi bi-file-earmark-excel me-1" aria-hidden="true" />
+        Export Excel writes every point of every chart above for the applied filters — not only the points currently
+        visible — with the filters and the generation date on a Summary sheet.
       </p>
     </div>
   );

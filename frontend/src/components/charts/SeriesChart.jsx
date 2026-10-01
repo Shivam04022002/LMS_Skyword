@@ -14,12 +14,22 @@ import { colorFor, compactInr, exactInr, niceScale, seriesOf, shortLabel, thinLa
  * nothing measures the DOM.
  */
 
-const VIEW = { width: 960, height: 340 };
-const PAD = { top: 16, right: 16, bottom: 52, left: 68 };
+const VIEW = { width: 960, height: 330 };
+/*
+ * Left padding carries a compact INR tick ("₹12.3L"), bottom padding carries a
+ * rotated date label. Both are sized for the longest label those formatters can
+ * produce, so a tick is never clipped and a label never collides with the next.
+ */
+const PAD = { top: 12, right: 20, bottom: 56, left: 76 };
 const PLOT = {
   width: VIEW.width - PAD.left - PAD.right,
   height: VIEW.height - PAD.top - PAD.bottom
 };
+
+const AXIS_TEXT = '#8b94a6';
+const GRID = '#eef0f5';
+const BASELINE = '#d7dce5';
+const GUIDE = '#10233f';
 
 export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = 'money' }) {
   const allSeries = seriesOf(chart);
@@ -35,15 +45,41 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
   const maxValue = Math.max(0, ...points.flatMap((point) => series.map((entry) => valueOf(point, entry.key))));
   const { max, ticks } = niceScale(maxValue);
 
-  const xFor = (index) => (points.length === 1 ? PLOT.width / 2 : (index * PLOT.width) / (points.length - 1));
+  /*
+   * Bars sit in the middle of a band; a line's points sit on the edges, so its
+   * first and last point touch the axis ends instead of floating inside them.
+   */
+  const band = PLOT.width / Math.max(points.length, 1);
+  const xFor = (index) =>
+    type === 'line'
+      ? points.length === 1
+        ? PLOT.width / 2
+        : (index * PLOT.width) / (points.length - 1)
+      : band * index + band / 2;
+
+  /*
+   * The hover band for a point: midway to each neighbour, clamped to the plot
+   * area. Centring a band on the point itself would push the first and last
+   * bands outside the axes in line mode, which put the first point's hover
+   * target on top of the y-axis labels.
+   */
+  const hitBand = (index) => {
+    const left = index === 0 ? 0 : (xFor(index - 1) + xFor(index)) / 2;
+    const right = index === points.length - 1 ? PLOT.width : (xFor(index) + xFor(index + 1)) / 2;
+    return { x: left, width: Math.max(right - left, 0) };
+  };
+
   const yFor = (value) => PLOT.height - (value / max) * PLOT.height;
   const keepLabel = thinLabels(points.length);
 
-  const bandWidth = PLOT.width / Math.max(points.length, 1);
-  const barWidth = Math.max(2, Math.min(28, (bandWidth * 0.7) / Math.max(series.length, 1)));
+  // A gap between bars, a gap between groups, and a floor so a long daily series
+  // still draws something visible.
+  const groupWidth = Math.min(band * 0.68, 30 * series.length);
+  const barWidth = Math.max(1.5, groupWidth / Math.max(series.length, 1));
 
   const format = (value) => (valueKind === 'count' ? String(value) : exactInr(value));
   const axisFormat = (value) => (valueKind === 'count' ? String(Math.round(value)) : compactInr(value));
+  const dense = points.length > 60;
 
   const toggle = (key) =>
     setHidden((current) => {
@@ -58,30 +94,25 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
   return (
     <div>
       {allSeries.length > 1 ? (
-        <div className="d-flex flex-wrap gap-2 mb-2">
-          {allSeries.map((entry, index) => {
+        <div className="lms-analytics-legend">
+          {allSeries.map((entry) => {
             const off = hidden.has(entry.key);
+            const color = colorFor(allSeries.indexOf(entry));
             return (
               <button
                 key={entry.key}
                 type="button"
-                className={`btn btn-sm border d-inline-flex align-items-center gap-1 ${off ? 'text-secondary' : ''}`}
+                className="lms-analytics-legend-item"
                 aria-pressed={!off}
                 onClick={() => toggle(entry.key)}
                 title={off ? `Show ${entry.label}` : `Hide ${entry.label}`}
               >
                 <span
+                  className="lms-analytics-swatch"
                   aria-hidden="true"
-                  style={{
-                    width: '0.75rem',
-                    height: '0.75rem',
-                    borderRadius: '2px',
-                    display: 'inline-block',
-                    background: off ? 'transparent' : colorFor(allSeries.indexOf(entry)),
-                    border: `2px solid ${colorFor(allSeries.indexOf(entry))}`
-                  }}
+                  style={{ background: off ? 'transparent' : color, boxShadow: `inset 0 0 0 2px ${color}` }}
                 />
-                <span className={off ? 'text-decoration-line-through' : ''}>{entry.label}</span>
+                <span className="lms-analytics-legend-text">{entry.label}</span>
               </button>
             );
           })}
@@ -92,76 +123,98 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
         <svg
           viewBox={`0 0 ${VIEW.width} ${VIEW.height}`}
           preserveAspectRatio="xMidYMid meet"
-          style={{ width: '100%', height: 'auto', display: 'block', overflow: 'visible' }}
+          style={{ width: '100%', height: 'auto', display: 'block' }}
           role="img"
           aria-label={`${chart.title}: ${type} chart of ${points.length} points`}
         >
           <g transform={`translate(${PAD.left},${PAD.top})`}>
-            {/* Gridlines and value axis */}
+            {/* Gridlines and the value axis. The zero line is the baseline, so it
+                is drawn once, below, rather than twice. */}
             {ticks.map((tick) => (
               <g key={tick}>
-                <line x1={0} x2={PLOT.width} y1={yFor(tick)} y2={yFor(tick)} stroke="#dee2e6" strokeWidth={1} />
-                <text x={-10} y={yFor(tick)} textAnchor="end" dominantBaseline="middle" fontSize={13} fill="#6c757d">
+                {tick > 0 ? (
+                  <line x1={0} x2={PLOT.width} y1={yFor(tick)} y2={yFor(tick)} stroke={GRID} strokeWidth={1} />
+                ) : null}
+                <text x={-12} y={yFor(tick)} textAnchor="end" dominantBaseline="middle" fontSize={12} fill={AXIS_TEXT}>
                   {axisFormat(tick)}
                 </text>
               </g>
             ))}
 
+            {/* The hovered column, behind the marks so it never hides them. */}
+            {hover ? (
+              <rect {...hitBand(hover.index)} y={0} height={PLOT.height} fill={GUIDE} opacity={0.04} />
+            ) : null}
+
             {/* Marks */}
             {type === 'line'
               ? series.map((entry) => {
+                  const color = colorFor(allSeries.indexOf(entry));
                   const path = points
                     .map((point, index) => `${index === 0 ? 'M' : 'L'} ${xFor(index)} ${yFor(valueOf(point, entry.key))}`)
                     .join(' ');
                   return (
                     <g key={entry.key}>
-                      <path d={path} fill="none" stroke={colorFor(allSeries.indexOf(entry))} strokeWidth={2.5} strokeLinejoin="round" />
-                      {points.map((point, index) => (
-                        <circle
-                          key={point.label}
-                          cx={xFor(index)}
-                          cy={yFor(valueOf(point, entry.key))}
-                          r={points.length > 60 ? 0 : 3.5}
-                          fill="#fff"
-                          stroke={colorFor(allSeries.indexOf(entry))}
-                          strokeWidth={2}
-                        />
-                      ))}
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth={2.25}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                      />
+                      {/* Markers are dropped on a dense series, where they would
+                          merge into a thick band, but the hovered one is always
+                          drawn so the reader can see what they are reading. */}
+                      {points.map((point, index) =>
+                        !dense || hover?.index === index ? (
+                          <circle
+                            key={point.label}
+                            cx={xFor(index)}
+                            cy={yFor(valueOf(point, entry.key))}
+                            r={hover?.index === index ? 4.5 : 3}
+                            fill="#fff"
+                            stroke={color}
+                            strokeWidth={2}
+                          />
+                        ) : null
+                      )}
                     </g>
                   );
                 })
               : points.map((point, index) =>
                   series.map((entry, seriesIndex) => {
                     const value = valueOf(point, entry.key);
-                    const height = Math.max(0, PLOT.height - yFor(value));
-                    const groupWidth = barWidth * series.length;
+                    const height = Math.max(value > 0 ? 1 : 0, PLOT.height - yFor(value));
                     const x = xFor(index) - groupWidth / 2 + seriesIndex * barWidth;
                     return (
                       <rect
                         key={`${point.label}-${entry.key}`}
                         x={x}
-                        y={yFor(value)}
-                        width={barWidth}
+                        y={PLOT.height - height}
+                        width={Math.max(barWidth - (series.length > 1 ? 1 : 0), 1)}
                         height={height}
                         fill={colorFor(allSeries.indexOf(entry))}
-                        rx={2}
+                        opacity={hover && hover.index !== index ? 0.55 : 1}
+                        rx={barWidth > 6 ? 2 : 0}
                       />
                     );
                   })
                 )}
 
             {/* Category axis */}
-            <line x1={0} x2={PLOT.width} y1={PLOT.height} y2={PLOT.height} stroke="#adb5bd" strokeWidth={1} />
+            <line x1={0} x2={PLOT.width} y1={PLOT.height} y2={PLOT.height} stroke={BASELINE} strokeWidth={1} />
             {points.map((point, index) =>
               keepLabel(index) ? (
                 <text
                   key={point.label}
                   x={xFor(index)}
-                  y={PLOT.height + 20}
+                  y={PLOT.height + 16}
                   textAnchor="end"
-                  fontSize={13}
-                  fill="#6c757d"
-                  transform={`rotate(-35 ${xFor(index)} ${PLOT.height + 20})`}
+                  fontSize={12}
+                  fill={hover?.index === index ? GUIDE : AXIS_TEXT}
+                  fontWeight={hover?.index === index ? 600 : 400}
+                  transform={`rotate(-38 ${xFor(index)} ${PLOT.height + 16})`}
                 >
                   {shortLabel(point.label, bucket)}
                 </text>
@@ -176,9 +229,8 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
             {points.map((point, index) => (
               <rect
                 key={`hit-${point.label}`}
-                x={xFor(index) - bandWidth / 2}
+                {...hitBand(index)}
                 y={0}
-                width={bandWidth}
                 height={PLOT.height}
                 fill="transparent"
                 onMouseEnter={() => setHover({ point, index })}
@@ -192,60 +244,44 @@ export default function SeriesChart({ chart, bucket, type = 'bar', valueKind = '
                   .join(', ')}`}
               />
             ))}
-
-            {hover ? (
-              <line
-                x1={xFor(hover.index)}
-                x2={xFor(hover.index)}
-                y1={0}
-                y2={PLOT.height}
-                stroke="#212529"
-                strokeWidth={1}
-                strokeDasharray="3 3"
-              />
-            ) : null}
           </g>
         </svg>
 
         {hover ? (
           <div
-            className="position-absolute bg-body border rounded shadow-sm px-2 py-1 small"
+            className="lms-analytics-tooltip"
             style={{
-              // Positioned in percentages of the plot area, so the tooltip
-              // follows the hovered column at any rendered width.
+              // Positioned as a percentage of the plot area, so the tooltip
+              // follows the hovered column at any rendered width. It flips side
+              // past the midpoint so it cannot be clipped by the card edge.
               left: `${((PAD.left + xFor(hover.index)) / VIEW.width) * 100}%`,
               top: 0,
-              transform: hover.index > points.length / 2 ? 'translate(-105%, 0)' : 'translate(8px, 0)',
-              pointerEvents: 'none',
-              zIndex: 2,
-              minWidth: '9rem'
+              transform: hover.index > points.length / 2 ? 'translate(calc(-100% - 10px), 0)' : 'translate(10px, 0)'
             }}
             role="tooltip"
           >
-            <div className="fw-semibold">{shortLabel(hover.point.label, bucket)}</div>
+            <div className="lms-analytics-tooltip-title">{shortLabel(hover.point.label, bucket)}</div>
             {hover.point.count !== null && hover.point.count !== undefined ? (
-              <div className="text-secondary">
+              <div className="text-secondary mb-1">
                 {hover.point.count} {hover.point.count === 1 ? 'record' : 'records'}
               </div>
             ) : null}
             {series.map((entry) => (
-              <div key={entry.key} className="d-flex align-items-center gap-1">
+              <div key={entry.key} className="lms-analytics-tooltip-row">
                 <span
+                  className="lms-analytics-swatch"
                   aria-hidden="true"
-                  style={{
-                    width: '0.6rem',
-                    height: '0.6rem',
-                    borderRadius: '2px',
-                    display: 'inline-block',
-                    background: colorFor(allSeries.indexOf(entry))
-                  }}
+                  style={{ background: colorFor(allSeries.indexOf(entry)) }}
                 />
-                <span className="text-secondary">{entry.label}:</span>
-                <span className="fw-semibold ms-auto">{format(valueOf(hover.point, entry.key))}</span>
+                <span className="text-secondary">{entry.label}</span>
+                <span className="lms-analytics-tooltip-value">{format(valueOf(hover.point, entry.key))}</span>
               </div>
             ))}
             {hover.point.collectionRate !== undefined && hover.point.collectionRate !== null ? (
-              <div className="text-secondary">Collection rate: {hover.point.collectionRate}%</div>
+              <div className="lms-analytics-tooltip-row mt-1 pt-1 border-top">
+                <span className="text-secondary">Collection rate</span>
+                <span className="lms-analytics-tooltip-value">{hover.point.collectionRate}%</span>
+              </div>
             ) : null}
           </div>
         ) : null}
